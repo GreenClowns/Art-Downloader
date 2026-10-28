@@ -110,6 +110,10 @@ python3 -m pytest
 
 The Windows build is made by GitHub Actions ([`windows.yml`](.github/workflows/windows.yml)): PyInstaller bundles the app together with gallery-dl, Inno Setup makes the installer. Publishing a GitHub Release with a tag such as `v1.0.0` builds it and attaches the files. Icons are generated from the logo with `python3 tools/make_icons.py`.
 
+## Security
+
+What the app stores, how it protects you and how to revoke DeviantArt access: see [SECURITY.md](SECURITY.md).
+
 ## Respect the artists
 
 This app is meant for your personal archive. Don't re-upload other people's work without their permission, and support the artists whose work you enjoy.

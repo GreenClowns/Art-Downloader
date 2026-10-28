@@ -4,6 +4,10 @@ name: windows
 # (Actions → windows → Artifacts). Publishing a GitHub Release with a tag
 # like v1.2.3 builds that version and attaches the installer and the
 # portable ZIP to the release.
+#
+# Security: the build job only has read access; only the small release job
+# can write, and only for published releases. Third-party actions are
+# pinned to exact commits (Dependabot keeps them up to date).
 
 on:
   push:
@@ -13,7 +17,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -22,25 +26,32 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
       - name: Install build tools
-        run: python -m pip install --upgrade pip pyinstaller gallery-dl pytest
+        run: python -m pip install --upgrade pip pyinstaller pytest -r requirements.txt
 
       - name: Tests
         run: python -m pytest -q
 
       - name: Version
         id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          if ("${{ github.ref_type }}" -eq "tag") {
-            $v = "${{ github.ref_name }}".TrimStart("v")
-          } else {
-            $v = "0.0.0"
+          $v = "0.0.0"
+          if ($env:REF_TYPE -eq "tag") {
+            $v = $env:REF_NAME.TrimStart("v")
+            if ($v -notmatch '^\d+\.\d+\.\d+$') {
+              throw "Release tag must look like v1.2.3, got '$($env:REF_NAME)'"
+            }
           }
           "value=$v" >> $env:GITHUB_OUTPUT
 
@@ -70,25 +81,42 @@ jobs:
           python -c $code
 
       - name: Portable ZIP
+        env:
+          APP_VERSION: ${{ steps.version.outputs.value }}
         run: |
-          $v = "${{ steps.version.outputs.value }}"
-          Compress-Archive -Path dist\ArtDownloader -DestinationPath "dist\ArtDownloader-$v-portable.zip"
+          Compress-Archive -Path dist\ArtDownloader -DestinationPath "dist\ArtDownloader-$($env:APP_VERSION)-portable.zip"
 
       - name: Installer (Inno Setup)
+        env:
+          APP_VERSION: ${{ steps.version.outputs.value }}
         run: |
-          choco install innosetup -y --no-progress
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ steps.version.outputs.value }}" windows\installer.iss
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          & $iscc "/DAppVersion=$($env:APP_VERSION)" windows\installer.iss
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ArtDownloader-windows
           path: |
             dist/*-Setup.exe
             dist/*-portable.zip
 
+  release:
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ArtDownloader-windows
+          path: dist
+
       - name: Attach files to the release
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: |
             dist/*-Setup.exe

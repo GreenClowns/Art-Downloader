@@ -8,6 +8,15 @@
 # ============================================================
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -z "$HOME" || "$HOME" == "/" || ! -d "$HOME" ]]; then
+    echo "✘ HOME is not set correctly; refusing to continue."
+    exit 1
+fi
+if [[ $EUID -eq 0 && -z "$ARTDL_ALLOW_ROOT" ]]; then
+    echo "✘ Don't run this installer with sudo — run it as your normal user."
+    echo "  (It asks for your password itself only if a system package is missing.)"
+    exit 1
+fi
 APP_DIR="$HOME/.local/share/art-downloader"
 DESKTOP_DIR="$HOME/.local/share/applications"
 DESKTOP="$DESKTOP_DIR/art-downloader.desktop"
@@ -83,7 +92,8 @@ elif [[ -n "$ARTDL_SKIP_DEPS" ]]; then
 else
     t "• Ставлю gallery-dl…" "• Installing gallery-dl…"
     command -v pipx >/dev/null 2>&1 || need_pkg pipx
-    pipx install gallery-dl || { t "✘ Не удалось установить gallery-dl" \
+    GDL_PIN="$(grep -i -m1 '^gallery-dl==' "$SRC_DIR/requirements.txt")"
+    pipx install "${GDL_PIN:-gallery-dl}" || { t "✘ Не удалось установить gallery-dl" \
                                    "✘ Could not install gallery-dl"; exit 1; }
     pipx ensurepath >/dev/null 2>&1 || true
 fi

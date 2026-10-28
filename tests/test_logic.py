@@ -245,3 +245,68 @@ def test_run_config_has_no_password_without_login():
             assert oct(os.stat(path).st_mode)[-3:] == "600"
     finally:
         os.remove(path)
+
+
+# ---------------------------------------------------------------- security
+
+def test_site_folder_names_cannot_escape():
+    for evil in ["..", "../../etc", "a/../b", "/abs", "..\\..\\win", "C:\\x"]:
+        for windows in (True, False):
+            name = a.safe_name(evil, windows=windows)
+            assert a.is_safe_component(name, windows=windows), (evil, windows, name)
+            assert "/" not in name and "\\" not in name and name != ".."
+
+
+def test_windows_reserved_names():
+    assert a.safe_name("CON", windows=True) == "CON_"
+    assert a.safe_name("nul.txt", windows=True) == "nul.txt_"
+    assert a.safe_name("com1", windows=False) == "com1_"
+    assert a.safe_name("Console", windows=True) == "Console"
+
+
+def test_tampered_order_file_cannot_write_outside(tmp_path):
+    dest = tmp_path / "dest"
+    (dest / a.INCOMING).mkdir(parents=True)
+    (dest / a.INCOMING / "da5_01_evil.png").write_text("x")
+    (dest / a.ORDER_FILE).write_text(
+        '{"5": ["../../outside", 1, 0, "evil", 0], "6": ["ok", 1]}')
+    order = a.load_order(dest)
+    assert "5" not in order and order["6"] == ["ok", 1]
+    # even if a bad entry is passed directly, nothing lands outside
+    a.organize(dest, {"5": ["../../outside", 1, 0, "evil", 0]})
+    assert not (tmp_path / "outside").exists()
+    assert not (tmp_path.parent / "outside").exists()
+    assert (dest / "evil.png").exists()
+
+
+def test_order_file_garbage_is_ignored(tmp_path):
+    for junk in ['[1, 2]', '{"": ["G", 1]}', '{"1": ["G", "1"]}',
+                 '{"1": [null, 1]}', 'not json']:
+        (tmp_path / a.ORDER_FILE).write_text(junk)
+        assert a.load_order(tmp_path) == {}
+
+
+def test_organize_never_overwrites_a_different_file(tmp_path):
+    inc = tmp_path / a.INCOMING
+    inc.mkdir()
+    (tmp_path / "G").mkdir()
+    (tmp_path / "G" / "001 - Part 1.png").write_text("old, different")
+    (inc / "da1_01_Part 1.png").write_text("new")
+    a.organize(tmp_path, {"1": ["G", 1]})
+    assert (tmp_path / "G" / "001 - Part 1.png").read_text() == "old, different"
+    assert (tmp_path / "G" / "001 - Part 1 (2).png").read_text() == "new"
+
+
+def test_drive_letter_names_unsafe_on_windows():
+    assert not a.is_safe_component("C:x", windows=True)
+    assert a.is_safe_component("C:x", windows=False)
+
+
+def test_risky_downloads_are_reported(tmp_path):
+    inc = tmp_path / a.INCOMING
+    inc.mkdir()
+    (inc / "setup.exe").write_text("x")
+    (inc / "picture.png").write_text("x")
+    risky = []
+    a.organize(tmp_path, {}, risky)
+    assert risky == ["setup.exe"]

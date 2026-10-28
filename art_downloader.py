@@ -266,11 +266,59 @@ def parse_urls(text):
     return result
 
 
+# Names Windows refuses for files and folders (also with an extension)
+WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL",
+                    *(f"COM{i}" for i in range(1, 10)),
+                    *(f"LPT{i}" for i in range(1, 10))}
+
+# Downloads with these extensions could run code if opened — warn about them
+RISKY_EXTENSIONS = {
+    ".exe", ".msi", ".bat", ".cmd", ".com", ".scr", ".pif", ".cpl", ".dll",
+    ".js", ".jse", ".vbs", ".vbe", ".wsf", ".wsh", ".hta", ".ps1", ".psm1",
+    ".lnk", ".url", ".reg", ".jar", ".sh", ".bash", ".run", ".desktop",
+    ".appimage", ".deb", ".rpm", ".py", ".pyw", ".apk", ".dmg", ".pkg",
+}
+
+
 def safe_name(name, windows=WINDOWS):
-    """Folder name without characters the file system forbids."""
+    """
+    Folder name from site data, safe to use as ONE path component: no
+    separators, no "..", nothing the file system forbids. Windows-reserved
+    names get a "_" so the folder also works if moved to Windows later.
+    """
     bad = r'[<>:"/\\|?*\x00-\x1f]' if windows else r'[/\\\x00-\x1f]'
-    name = re.sub(bad, "-", name or "").strip(" .")
-    return name[:120] or tr("Без названия", "Untitled")
+    name = re.sub(bad, "-", name or "").strip(" .")[:120].strip(" .")
+    if name.split(".")[0].upper() in WINDOWS_RESERVED:
+        name += "_"
+    return name or tr("Без названия", "Untitled")
+
+
+def is_safe_component(name, windows=WINDOWS):
+    """True if `name` is a single, harmless folder name inside a folder."""
+    # on Windows "C:x" would mean "x on drive C:", so ":" is never allowed
+    bad = r'[/\\:\x00]' if windows else r'[/\\\x00]'
+    return (isinstance(name, str) and name not in ("", ".", "..")
+            and not re.search(bad, name) and name == name.strip())
+
+
+def inside(base, path):
+    """True if `path` stays inside `base` (after resolving .. and links)."""
+    try:
+        Path(path).resolve().relative_to(Path(base).resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def unique_path(path):
+    """`path`, or "name (2).ext", "name (3).ext", … if it already exists."""
+    path = Path(path)
+    n = 2
+    candidate = path
+    while candidate.exists():
+        candidate = path.with_name(f"{path.stem} ({n}){path.suffix}")
+        n += 1
+    return candidate
 
 
 def group_name(folder_title, url):
@@ -419,6 +467,8 @@ def titles_from_disk(dest, order):
         if not v[3]:
             by_group.setdefault(v[0], {})[v[1]] = idx
     for group, by_pos in by_group.items():
+        if not is_safe_component(group):
+            continue
         for _path, pos, num, title, _ext in scan_group(Path(dest) / group):
             if pos in by_pos and num == 1:
                 order[by_pos[pos]][3] = clean_title(title)
@@ -435,6 +485,8 @@ def renumber(dest, old, new):
     moves = []
     groups = {v[0] for v in new.values()}
     for group in groups:
+        if not is_safe_component(group) or not inside(dest, dest / group):
+            continue
         mapping = {}
         for idx, value in new.items():
             if value[0] == group and idx in old and old[idx][0] == group:
@@ -453,9 +505,7 @@ def renumber(dest, old, new):
         path.rename(tmp)
         temps.append((tmp, target))
     for tmp, target in temps:
-        if target.exists():          # never overwrite — keep the old name
-            target = target.with_name(f"{target.stem} (2){target.suffix}")
-        tmp.rename(target)
+        tmp.rename(unique_path(target))   # never overwrite another file
     return len(moves)
 
 
@@ -472,10 +522,25 @@ def reorder(dest, mode):
 
 
 def load_order(dest):
+    """
+    Reads .order.json. Entries that don't look right (a folder name that
+    could point outside the download folder, a bad number) are dropped,
+    so a damaged or tampered file can't make the app write elsewhere.
+    """
     try:
-        return json.loads((Path(dest) / ORDER_FILE).read_text(encoding="utf-8"))
+        data = json.loads((Path(dest) / ORDER_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+    if not isinstance(data, dict):
+        return {}
+    clean = {}
+    for idx, value in data.items():
+        if (isinstance(idx, str) and idx
+                and isinstance(value, list) and len(value) >= 2
+                and is_safe_component(value[0])
+                and isinstance(value[1], int) and 0 < value[1] < 10**7):
+            clean[idx] = value
+    return clean
 
 
 def save_order(dest, order):
@@ -483,10 +548,12 @@ def save_order(dest, order):
         json.dumps(order, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
-def organize(dest, order):
+def organize(dest, order, risky=None):
     """
     Moves downloads out of .incoming: DeviantArt files go to their gallery
-    folder as "NNN - Title", everything else to the main folder.
+    folder as "NNN - Title", everything else to the main folder. Never
+    overwrites a different file and never writes outside `dest`.
+    Names of files that could run code are appended to `risky`.
     Returns {folder: number of files}.
     """
     dest = Path(dest)
@@ -498,7 +565,8 @@ def organize(dest, order):
         if not f.is_file() or f.suffix == ".part" or f.name.startswith("."):
             continue
         m = DA_FILE_RE.match(f.name)
-        if m and m.group(1) in order:
+        if (m and m.group(1) in order
+                and is_safe_component(order[m.group(1)][0])):
             group, pos = order[m.group(1)][0], order[m.group(1)][1]
             num, title, ext = int(m.group(2)), m.group(3), m.group(4) or ""
             name = numbered_name(pos, group_width(order, group), num, title, ext)
@@ -509,9 +577,19 @@ def organize(dest, order):
             group, target_dir = ".", dest
         else:        # other sites — keep as is
             name, group, target_dir = f.name, ".", dest
+        if not inside(dest, target_dir / name):
+            group, target_dir, name = ".", dest, Path(f.name).name
         target_dir.mkdir(parents=True, exist_ok=True)
-        f.replace(target_dir / name)
+        target = target_dir / name
+        if target.exists():
+            if target.is_file() and target.stat().st_size == f.stat().st_size:
+                f.unlink()                    # same file downloaded again
+                continue
+            target = unique_path(target)      # never overwrite another file
+        f.replace(target)
         moved[group] = moved.get(group, 0) + 1
+        if risky is not None and target.suffix.lower() in RISKY_EXTENSIONS:
+            risky.append(str(target.relative_to(dest)))
     try:
         inc.rmdir()
     except OSError:
@@ -1111,6 +1189,17 @@ class App:
         if self.var_sort.get():
             self.report_sorted(sort_all_chapters(folder))
 
+    def report_risky(self, names):
+        if not names:
+            return
+        self.log(tr(f"⚠ Среди скачанного есть файлы, которые могут запускать "
+                    f"программы ({len(names)}). Не открывай их, если не "
+                    f"уверен в источнике:",
+                    f"⚠ Some downloads can run programs ({len(names)}). "
+                    f"Don't open them unless you trust the source:"), "err")
+        for name in names:
+            self.log("   " + name, "err")
+
     def report_organized(self, moved):
         if not moved:
             return
@@ -1321,7 +1410,9 @@ class App:
         finally:
             # 4. Put files in order — even after Stop
             try:
-                self.emit("organized", organize(dest, load_order(dest)))
+                risky = []
+                self.emit("organized", organize(dest, load_order(dest), risky))
+                self.emit("risky", risky)
                 if do_sort:
                     self.emit("sorted", sort_all_chapters(dest))
             except Exception as e:
@@ -1391,6 +1482,8 @@ class App:
                     self.log(*payload)
                 elif kind == "status":
                     self.var_status.set(payload)
+                elif kind == "risky":
+                    self.report_risky(payload)
                 elif kind == "organized":
                     self.report_organized(payload)
                 elif kind == "sorted":

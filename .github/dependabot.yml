@@ -1,0 +1,12 @@
+# Opens pull requests when a library or a GitHub Action used by the project
+# gets an update (security fixes included). Merge them after the tests pass.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
