@@ -1,4 +1,6 @@
-# Art Downloader
+<p align="center"><img src="assets/logo.png" alt="Логотип Art Downloader" width="160"></p>
+
+<h1 align="center">Art Downloader</h1>
 
 [English](README.md) · **Русский**
 
