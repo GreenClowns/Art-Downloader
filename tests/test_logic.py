@@ -1,13 +1,49 @@
-"""Тесты логики без окна и без интернета: python3 -m pytest"""
+"""Logic tests — no window, no internet: python3 -m pytest"""
 
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import art_downloader as a  # noqa: E402
 
-BY_DATE, BY_GALLERY, BY_NAME = a.ORDER_MODES
+BY_DATE, BY_GALLERY, BY_NAME = a.ORDER_KEYS
+
+
+@pytest.fixture(autouse=True)
+def english():
+    a.set_lang("en")
+    yield
+    a.set_lang("en")
+
+
+def test_detect_lang():
+    assert a.detect_lang({"LANG": "ru_RU.UTF-8"}) == "ru"
+    assert a.detect_lang({"LANG": "uk_UA.UTF-8"}) == "ru"
+    assert a.detect_lang({"LANG": "sv_SE.UTF-8"}) == "en"
+    assert a.detect_lang({"LANGUAGE": "en_US", "LANG": "ru_RU.UTF-8"}) == "en"
+    assert a.detect_lang({}) == "en"
+
+
+def test_tr_and_labels():
+    assert a.tr("Привет", "Hello") == "Hello"
+    assert a.order_label("date") == "by publication date"
+    a.set_lang("ru")
+    assert a.tr("Привет", "Hello") == "Привет"
+    assert a.order_label("date") == "по дате публикации"
+    assert a.browser_label("none") == "не брать из браузера"
+    assert a.browser_label("firefox") == "firefox"
+
+
+def test_migrate_old_russian_settings():
+    old = {"order": "по названию", "browser": "не брать из браузера", "threads": 4}
+    new = a.migrate_config(old)
+    assert new["order"] == "name"
+    assert new["browser"] == "none"
+    assert new["threads"] == 4
+    assert a.migrate_config({}) == {"order": "date", "browser": "firefox"}
 
 
 def test_classify_url():

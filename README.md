@@ -1,20 +1,23 @@
 # Art Downloader
 
-Простая программа с окном для Linux, чтобы скачивать арты и комиксы с **DeviantArt** (и других сайтов, которые поддерживает [gallery-dl](https://github.com/mikf/gallery-dl)) — целыми папками, по порядку и без путаницы в файлах.
+**English** · [Русский](README.ru.md)
 
-![Окно программы](docs/screenshot.png)
+A simple Linux desktop app for downloading art and comics from **DeviantArt** (and other sites supported by [gallery-dl](https://github.com/mikf/gallery-dl)) — whole folders at once, in reading order, with no mixed-up files.
 
-## Что умеет
+![App window](docs/screenshot.png)
 
-- **Скачивает целиком**: папку, главу, всю серию, галерею, профиль или отдельную работу — просто вставь ссылку.
-- **Все картинки внутри работы**: если в одном посте DeviantArt несколько изображений, скачаются все, а не только первое.
-- **По порядку**: у каждой папки с сайта — своя папка на компьютере, файлы пронумерованы `001`, `002`, … Порядок — по дате публикации, как в галерее или по названию (`Part 2` раньше `Part 10`).
-- **Работы 18+**: кнопка «Подключить DeviantArt» один раз даёт программе доступ от имени твоего аккаунта (официальный вход DeviantArt для программ). Пароль программа не хранит.
-- **Быстро**: скачивание в несколько потоков.
-- **Надёжно**: сама повторяет то, что не скачалось; после «Стоп» продолжает с места; уже скачанное не качает повторно.
-- **Главы**: если в одной папке перемешаны главы, раскладывает их по `Chapter 01`, `Chapter 02`, …
+## Features
 
-Пример результата:
+- **Download everything at once**: a folder, chapter, whole series, gallery, profile or a single work — just paste the link.
+- **Every image inside a work**: if a DeviantArt post has several images, you get all of them, not just the first one.
+- **In order**: each gallery folder on the site gets its own folder on your computer, and files are numbered `001`, `002`, … Order by publication date, gallery order or title (`Part 2` before `Part 10`).
+- **18+ works**: the “Connect DeviantArt” button gives the app access on behalf of your account, once (DeviantArt's official sign-in for apps). The app never stores your password.
+- **Fast**: parallel downloads.
+- **Reliable**: retries failed files automatically, resumes after Stop, never downloads the same file twice.
+- **Chapters**: if one folder mixes several chapters, it can split them into `Chapter 01`, `Chapter 02`, …
+- **Two languages**: English and Russian, switch with 🌐 in the top-right corner. Defaults to your system language.
+
+Example result:
 
 ```
 ArtDownloads/My Comic/
@@ -24,23 +27,23 @@ ArtDownloads/My Comic/
 │   └── …
 └── Chapter 2/
     ├── 004 - My Comic - Chapter 2 - Page 4.png
-    ├── 004-02 - My Comic - Chapter 2 - Page 4.png   ← вторая картинка в той же работе
+    ├── 004-02 - My Comic - Chapter 2 - Page 4.png   ← second image in the same work
     └── …
 ```
 
-## Установка
+## Installation
 
-Нужен Linux (проверено на Fedora; Ubuntu/Debian тоже подходят).
+Requires Linux (tested on Fedora; Ubuntu/Debian work too).
 
-1. Нажми зелёную кнопку **Code → Download ZIP** и распакуй архив.
-2. Открой терминал в распакованной папке и выполни один раз:
+1. Click the green **Code → Download ZIP** button and unpack the archive.
+2. Open a terminal in the unpacked folder and run once:
    ```bash
    bash install.sh
    ```
-   Установщик сам поставит всё нужное (`python3-tkinter`, `gallery-dl`) — может спросить пароль от компьютера.
-3. Готово: «Art Downloader» появится в меню приложений (клавиша Super → начни вводить «Art»).
+   The installer sets up everything it needs (`python3-tkinter`, `gallery-dl`) and may ask for your computer password.
+3. Done: “Art Downloader” appears in your applications menu (press Super and start typing “Art”).
 
-Или через git:
+Or with git:
 
 ```bash
 git clone https://github.com/GreenClowns/Art-Downloader.git
@@ -48,48 +51,48 @@ cd Art-Downloader
 bash install.sh
 ```
 
-## Как пользоваться
+## How to use
 
-1. Вставь ссылки — по одной на строку.
-2. Впиши «Название работы» — это будет папка, куда всё сохранится.
-3. Для работ 18+ один раз нажми **🔑 Подключить DeviantArt**: в браузере откроется DeviantArt, нажми **Authorize**.
-4. Нажми **⬇ Скачать**.
+1. Paste links, one per line.
+2. Enter a “Project name” — that's the folder everything is saved to.
+3. For 18+ works, click **🔑 Connect DeviantArt** once: DeviantArt opens in your browser, click **Authorize**.
+4. Click **⬇ Download**.
 
-Если скачивание прервалось — просто нажми «Скачать» ещё раз: программа докачает только недостающее, номера файлов не собьются.
+If a download gets interrupted, just click “Download” again: the app fetches only what's missing, and file numbers stay the same.
 
-## Частые вопросы
+## FAQ
 
-**Ошибка `403 Forbidden` на работах 18+.**
-Нажми «Подключить DeviantArt» и скачай ещё раз. Без этого DeviantArt отдаёт программам только размытую версию.
+**`403 Forbidden` errors on 18+ works.**
+Click “Connect DeviantArt” and download again. Without it, DeviantArt only gives apps a blurred version.
 
-**Некоторые работы так и не скачались.**
-Обычно это платный контент (подписка, Premium Gallery). Его можно скачать, только если у тебя есть доступ к нему на сайте. Список таких файлов программа выводит в конце журнала.
+**Some works still didn't download.**
+Usually that's paid content (subscriptions, Premium Gallery). You can only download it if you have access to it on the site. The app lists these files at the end of the log.
 
-**Где хранятся настройки?**
-В `~/.config/art_downloader.json`. Пароль туда не записывается.
+**Where are the settings stored?**
+In `~/.config/art_downloader.json`. Your password is never written there.
 
-## Удаление
+## Uninstall
 
-Правый клик по значку в меню → **«Удалить Art Downloader»**. Или:
+Right-click the app icon in the menu → **“Uninstall Art Downloader”**. Or:
 
 ```bash
-bash install.sh удалить
+bash install.sh uninstall
 ```
 
-Скачанные картинки при этом не удаляются.
+Your downloaded images are not deleted.
 
-## Для разработчиков
+## For developers
 
-Вся программа — один файл [`art_downloader.py`](art_downloader.py) (Python + Tkinter), скачивание выполняет [gallery-dl](https://github.com/mikf/gallery-dl). Тесты логики (без интернета):
+The whole app is a single file, [`art_downloader.py`](art_downloader.py) (Python + Tkinter); downloading is done by [gallery-dl](https://github.com/mikf/gallery-dl). Logic tests (no internet needed):
 
 ```bash
 python3 -m pytest
 ```
 
-## Уважай авторов
+## Respect the artists
 
-Программа сделана для личного архива. Не выкладывай чужие работы повторно без согласия автора и поддерживай художников, если тебе нравится их творчество.
+This app is meant for your personal archive. Don't re-upload other people's work without their permission, and support the artists whose work you enjoy.
 
-## Лицензия
+## License
 
 [MIT](LICENSE)

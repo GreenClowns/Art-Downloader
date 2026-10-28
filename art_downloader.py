@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Art Downloader — простое окно поверх gallery-dl.
+Art Downloader — a small GUI on top of gallery-dl.
 
-Умеет:
-  * скачивать по ссылкам на папки, галереи, отдельные работы (DeviantArt
-    и любые другие сайты, которые поддерживает gallery-dl);
-  * для DeviantArt — скачивать ВСЕ картинки внутри многостраничных работ;
-  * сохранять по порядку: каждая папка автора — своя папка у тебя,
-    файлы пронумерованы 001, 002, … (по дате, как в галерее или по названию);
-  * входить в DeviantArt по логину и паролю или брать вход из браузера;
-  * качать в несколько потоков, сам повторять неудачное;
-  * продолжать с места остановки (уже скачанное пропускается).
+Features:
+  * downloads folders, series, galleries, profiles and single works from
+    DeviantArt (and any other site gallery-dl supports);
+  * downloads EVERY image inside multi-image DeviantArt posts;
+  * saves in order: one folder per gallery, files numbered 001, 002, …
+    (by publication date, gallery order or title);
+  * DeviantArt sign-in (OAuth button, login/password or browser cookies);
+  * parallel downloads, automatic retry, resume after stop;
+  * interface in English and Russian.
 
-Запуск:  python3 art_downloader.py
-Нужно:   gallery-dl  и  python3-tkinter  (sudo dnf install python3-tkinter)
+Run:       python3 art_downloader.py
+Requires:  gallery-dl and Tkinter (Fedora: sudo dnf install python3-tkinter)
 """
 
 import json
@@ -31,21 +31,20 @@ from tkinter import filedialog, messagebox, ttk
 APP_TITLE = "Art Downloader"
 CONFIG_PATH = Path.home() / ".config" / "art_downloader.json"
 DEFAULT_BASE = Path.home() / "ArtDownloads"
-BROWSERS = ["firefox", "chrome", "chromium", "не брать из браузера"]
-NO_BROWSER = BROWSERS[-1]
-ORDER_MODES = ["по дате публикации", "как в галерее", "по названию"]
+MAX_THREADS = 5
+
+BROWSER_KEYS = ["firefox", "chrome", "chromium", "none"]
+ORDER_KEYS = ["date", "gallery", "name"]
 
 LINKS_FILE = "links.txt"
 ARCHIVE_FILE = ".downloaded.sqlite3"
 ORDER_FILE = ".order.json"
-INCOMING = ".incoming"          # сюда качается, потом раскладывается
-SINGLE_GROUP = "Отдельные работы"
-MAX_THREADS = 5
+INCOMING = ".incoming"          # downloads land here, then get organized
 
-# Имя, под которым gallery-dl сохраняет файлы DeviantArt (до переименования)
+# How gallery-dl names DeviantArt files before we rename them
 DA_FILENAME = "da{index}_{num|'1':>02}_{title}.{extension}"
 DA_FILE_RE = re.compile(r"^da(\d+)_(\d+)_(.*?)(\.[^.]+)?$")
-# Строка, которую печатает gallery-dl при сборе ссылок
+# Line printed by gallery-dl while collecting the list of works
 COLLECT_FMT = "@@{index}\t{published_time}\t{folder[title]}\t{title}"
 COLLECT_RE = re.compile(r"^@@(\d+)\t([^\t]*)\t([^\t]*)\t(.*)$")
 CHAPTER_RE = re.compile(
@@ -56,11 +55,71 @@ CHAPTER_DIR_RE = re.compile(r"^Chapter \d+$")
 
 
 # --------------------------------------------------------------------------
-# Логика без окна (её можно проверять отдельно)
+# Language
+# --------------------------------------------------------------------------
+
+LANGUAGES = {"en": "English", "ru": "Русский"}
+_lang = "en"
+
+
+def detect_lang(env=None):
+    """Interface language from the system locale: Russian for ru/uk/be/kk."""
+    env = os.environ if env is None else env
+    for var in ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"):
+        value = (env.get(var) or "").lower()
+        if value:
+            return "ru" if value[:2] in ("ru", "uk", "be", "kk") else "en"
+    return "en"
+
+
+def set_lang(code):
+    global _lang
+    _lang = code if code in LANGUAGES else "en"
+
+
+def get_lang():
+    return _lang
+
+
+def tr(ru, en):
+    """Pick the string for the current interface language."""
+    return ru if _lang == "ru" else en
+
+
+def browser_label(key):
+    if key == "none":
+        return tr("не брать из браузера", "don't use a browser")
+    return key
+
+
+def order_label(key):
+    return {"date": tr("по дате публикации", "by publication date"),
+            "gallery": tr("как в галерее", "as in the gallery"),
+            "name": tr("по названию", "by title")}[key]
+
+
+def migrate_config(cfg):
+    """Settings from older versions stored Russian labels instead of keys."""
+    cfg = dict(cfg)
+    old_order = {"по дате публикации": "date", "как в галерее": "gallery",
+                 "по названию": "name"}
+    if cfg.get("order") in old_order:
+        cfg["order"] = old_order[cfg["order"]]
+    if cfg.get("order") not in ORDER_KEYS:
+        cfg["order"] = "date"
+    if cfg.get("browser") in ("не брать из браузера", "без входа"):
+        cfg["browser"] = "none"
+    if cfg.get("browser") not in BROWSER_KEYS:
+        cfg["browser"] = "firefox"
+    return cfg
+
+
+# --------------------------------------------------------------------------
+# Logic without the window (tested separately)
 # --------------------------------------------------------------------------
 
 def find_gallery_dl():
-    """Путь к gallery-dl: из PATH или из ~/.local/bin (установка через pipx)."""
+    """Path to gallery-dl: from PATH or ~/.local/bin (pipx install)."""
     found = shutil.which("gallery-dl")
     if found:
         return found
@@ -75,9 +134,9 @@ def is_deviantart(url):
 
 def classify_url(url):
     """
-    'expand' — ссылка DeviantArt на папку/галерею/профиль: сначала
-               собираем список работ внутри (и их порядок);
-    'direct' — всё остальное (отдельная работа DA или другой сайт).
+    'expand' — a DeviantArt folder/gallery/profile link: first collect the
+               list of works inside (and their order);
+    'direct' — anything else (a single DA work or another site).
     """
     if not is_deviantart(url):
         return "direct"
@@ -88,7 +147,7 @@ def classify_url(url):
 
 
 def deviation_id(url):
-    """Номер работы DeviantArt из прямой ссылки (или None)."""
+    """DeviantArt work number from a direct link (or None)."""
     if not is_deviantart(url):
         return None
     u = url.split("?")[0].split("#")[0].rstrip("/")
@@ -97,7 +156,7 @@ def deviation_id(url):
 
 
 def parse_urls(text):
-    """Ссылки из текста: по одной на строку, без дублей, порядок сохраняется."""
+    """Links from text: one per line, no duplicates, order kept."""
     seen, result = set(), []
     for line in text.splitlines():
         for part in line.split():
@@ -108,13 +167,13 @@ def parse_urls(text):
 
 
 def safe_name(name):
-    """Название папки без запрещённых символов."""
+    """Folder name without forbidden characters."""
     name = re.sub(r'[/\\\x00-\x1f]', "-", name or "").strip(" .")
-    return name[:120] or "Без названия"
+    return name[:120] or tr("Без названия", "Untitled")
 
 
 def group_name(folder_title, url):
-    """Название папки: как на сайте, иначе из ссылки."""
+    """Folder name: as on the site, otherwise derived from the link."""
     if folder_title and folder_title != "None":
         return safe_name(folder_title)
     tail = url.split("?")[0].split("#")[0].rstrip("/").split("/")[-1]
@@ -124,7 +183,7 @@ def group_name(folder_title, url):
 
 
 def parse_collect_line(line):
-    """'@@index<TAB>время<TAB>папка<TAB>название' → кортеж или None."""
+    """'@@index<TAB>time<TAB>folder<TAB>title' → tuple or None."""
     m = COLLECT_RE.match(line.strip("\r\n"))
     if not m:
         return None
@@ -136,19 +195,19 @@ def parse_collect_line(line):
 
 
 def natural_key(s):
-    """Сортировка «по-человечески»: Part 2 раньше Part 10."""
+    """Human sorting: Part 2 before Part 10."""
     return [int(t) if t.isdigit() else t.lower()
             for t in re.split(r"(\d+)", s or "")]
 
 
 def build_order(entries, mode, existing=None):
     """
-    entries:  [(index, published, group, title), …] в порядке, как их
-              отдал сайт (порядок галереи).
-    mode:     один из ORDER_MODES.
-    existing: прошлый результат {index: [group, pos]} — уже выданные
-              номера не меняются, новые работы дописываются в конец.
-    Возвращает {index: [group, pos]}.
+    entries:  [(index, published, group, title), …] in the order the site
+              returned them (gallery order).
+    mode:     one of ORDER_KEYS.
+    existing: previous result {index: [group, pos]} — numbers already given
+              never change, new works are appended at the end.
+    Returns {index: [group, pos]}.
     """
     order = {k: list(v) for k, v in (existing or {}).items()}
     groups = {}
@@ -158,11 +217,11 @@ def build_order(entries, mode, existing=None):
         groups.setdefault(group, []).append((idx, published, title, seq))
 
     for group, items in groups.items():
-        if mode == ORDER_MODES[0]:      # по дате
+        if mode == "date":
             items.sort(key=lambda e: (e[1] or 0, e[3]))
-        elif mode == ORDER_MODES[2]:    # по названию
+        elif mode == "name":
             items.sort(key=lambda e: (natural_key(e[2]), e[3]))
-        else:                           # как в галерее
+        else:  # gallery order
             items.sort(key=lambda e: e[3])
         pos = max([p for g, p in order.values() if g == group], default=0)
         for idx, _, _, _ in items:
@@ -185,9 +244,9 @@ def save_order(dest, order):
 
 def organize(dest, order):
     """
-    Переносит скачанное из .incoming: файлы DeviantArt — в папку своей
-    галереи под номером «NNN - Название», остальное — в основную папку.
-    Возвращает {папка: сколько файлов}.
+    Moves downloads out of .incoming: DeviantArt files go to their gallery
+    folder as "NNN - Title", everything else to the main folder.
+    Returns {folder: number of files}.
     """
     dest = Path(dest)
     inc = dest / INCOMING
@@ -210,11 +269,11 @@ def organize(dest, order):
                 name += f"-{num:02d}"
             name += f" - {title}{ext}"
             target_dir = dest / group
-        elif m:      # DeviantArt, но порядок неизвестен
+        elif m:      # DeviantArt, but order unknown
             num, title, ext = int(m.group(2)), m.group(3), m.group(4) or ""
             name = title + (f" ({num})" if num > 1 else "") + ext
             group, target_dir = ".", dest
-        else:        # другие сайты — как есть
+        else:        # other sites — keep as is
             name, group, target_dir = f.name, ".", dest
         target_dir.mkdir(parents=True, exist_ok=True)
         f.replace(target_dir / name)
@@ -227,7 +286,7 @@ def organize(dest, order):
 
 
 def chapter_folder(filename):
-    """Название папки главы для файла или None, если главы в имени нет."""
+    """Chapter folder name for a file, or None if the name has no chapter."""
     m = CHAPTER_RE.search(filename)
     if not m:
         return None
@@ -236,8 +295,8 @@ def chapter_folder(filename):
 
 def sort_into_chapters(folder):
     """
-    Если в одной папке лежат разные главы — разносит их по Chapter NN.
-    Файлы без главы в названии остаются на месте. Ничего не удаляет.
+    If one folder holds several chapters, move them into Chapter NN.
+    Files without a chapter in the name stay put. Nothing is deleted.
     """
     folder = Path(folder)
     files = [f for f in sorted(folder.iterdir())
@@ -261,7 +320,7 @@ def sort_into_chapters(folder):
 
 
 def sort_all_chapters(dest):
-    """Разбивка по главам в основной папке и в каждой папке галереи."""
+    """Chapter split in the main folder and in every gallery folder."""
     dest = Path(dest)
     result = {}
     folders = [dest] + [d for d in sorted(dest.iterdir())
@@ -275,16 +334,16 @@ def sort_all_chapters(dest):
 
 
 def split_round_robin(items, n):
-    """Делит список на n частей по очереди (1-я ссылка → 1-й поток, …)."""
+    """Splits a list into n parts in turn (1st link → 1st thread, …)."""
     n = max(1, min(n, len(items)))
     return [items[i::n] for i in range(n)]
 
 
 def retry_links(failed_names, all_links):
     """
-    Какие ссылки повторить. Для DeviantArt номер работы есть в имени файла,
-    так что повторяем только нужные. Иначе — весь список (скачанное
-    пропустится по архиву).
+    Which links to retry. DeviantArt file names contain the work number, so
+    only those are retried. Otherwise the whole list (finished files are
+    skipped thanks to the archive).
     """
     ids = []
     for name in failed_names:
@@ -297,9 +356,9 @@ def retry_links(failed_names, all_links):
 
 def make_run_config(username=None, password=None):
     """
-    Временный файл настроек gallery-dl: имена файлов DeviantArt с номером
-    работы (для нумерации) и, если задан, логин/пароль. Права 600,
-    удаляется после работы — пароль нигде не остаётся.
+    Temporary gallery-dl config: DeviantArt file names with the work number
+    (for numbering) and, if given, login/password. Mode 600, deleted after
+    the run — the password is never kept.
     """
     da = {"filename": DA_FILENAME}
     if username:
@@ -313,63 +372,81 @@ def make_run_config(username=None, password=None):
 
 def base_args(browser, config_path):
     args = ["-c", config_path]
-    if browser and browser != NO_BROWSER:
+    if browser and browser != "none":
         args += ["--cookies-from-browser", browser]
     return args
 
 
 def pretty_name(path):
-    """Имя скачанного файла для журнала, без служебной приставки."""
+    """Downloaded file name for the log, without the internal prefix."""
     name = os.path.basename(path.strip())
     return re.sub(r"^da\d+_\d+_", "", name)
 
 
 # --------------------------------------------------------------------------
-# Окно
+# Window
 # --------------------------------------------------------------------------
+
+class KeyedCombo:
+    """Read-only combobox that shows translated labels but stores keys."""
+
+    def __init__(self, parent, keys, label_fn, key, width=20):
+        self.keys, self.label_fn, self.key = keys, label_fn, key
+        self.var = tk.StringVar(value=label_fn(key))
+        self.widget = ttk.Combobox(parent, textvariable=self.var, width=width,
+                                   values=[label_fn(k) for k in keys],
+                                   state="readonly")
+        self.widget.bind("<<ComboboxSelected>>", self._changed)
+
+    def _changed(self, _event=None):
+        labels = [self.label_fn(k) for k in self.keys]
+        if self.var.get() in labels:
+            self.key = self.keys[labels.index(self.var.get())]
+
+    def get(self):
+        return self.key
+
 
 class App:
     def __init__(self, root):
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("840x800")
-        self.root.minsize(660, 620)
+        self.root.geometry("860x830")
+        self.root.minsize(680, 640)
 
         self.procs = []
         self.procs_lock = threading.Lock()
         self.stop_flag = threading.Event()
         self.events = queue.Queue()
         self.worker = None
+        self.running = False
         self.stats = {"done": 0, "skip": 0, "err": 0}
         self.failed = []
         self.counting_skips = True
 
-        cfg = self.load_config()
+        cfg = migrate_config(self.load_config())
+        set_lang(cfg.get("lang") or detect_lang())
+        self.browser_key = cfg["browser"]
+        self.order_key = cfg["order"]
         self.var_base = tk.StringVar(value=cfg.get("base", str(DEFAULT_BASE)))
         self.var_name = tk.StringVar(value="")
-        self.var_browser = tk.StringVar(value=cfg.get("browser", "firefox"))
-        if self.var_browser.get() not in BROWSERS:
-            self.var_browser.set(NO_BROWSER)
         self.var_user = tk.StringVar(value=cfg.get("username", ""))
         self.var_pass = tk.StringVar(value="")
         self.var_threads = tk.IntVar(value=cfg.get("threads", 3))
-        self.var_order = tk.StringVar(value=cfg.get("order", ORDER_MODES[0]))
-        if self.var_order.get() not in ORDER_MODES:
-            self.var_order.set(ORDER_MODES[0])
         self.var_sort = tk.BooleanVar(value=cfg.get("sort", True))
         self.var_retry = tk.BooleanVar(value=cfg.get("retry", True))
         self.da_connected = bool(cfg.get("da_connected", False))
         self.var_connected = tk.StringVar()
-        self.update_connected()
-        self.var_status = tk.StringVar(value="Готово к работе")
+        self.var_status = tk.StringVar()
         self.var_stats = tk.StringVar(value="")
 
         self.build_ui()
+        self.refresh_texts()
         self.check_gallery_dl()
         self.root.after(100, self.poll_events)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
-    # ---------- интерфейс ----------
+    # ---------- interface ----------
 
     def build_ui(self):
         pad = {"padx": 10, "pady": 4}
@@ -382,99 +459,124 @@ class App:
                         padding=(14, 6))
         grey = {"foreground": "#666"}
 
-        # Ссылки
-        frm_links = ttk.LabelFrame(self.root, text=" Ссылки (по одной на строку) ")
+        # Language
+        frm_top = ttk.Frame(self.root)
+        frm_top.pack(fill="x", padx=10, pady=(6, 0))
+        self.cmb_lang = KeyedCombo(frm_top, list(LANGUAGES), LANGUAGES.get,
+                                   get_lang(), width=10)
+        self.cmb_lang.widget.pack(side="right")
+        self.cmb_lang.widget.bind("<<ComboboxSelected>>", self.change_language,
+                                  add="+")
+        ttk.Label(frm_top, text="🌐").pack(side="right", padx=(0, 4))
+
+        # Links
+        frm_links = ttk.LabelFrame(
+            self.root, text=tr(" Ссылки (по одной на строку) ",
+                               " Links (one per line) "))
         frm_links.pack(fill="x", **pad)
         self.txt_links = tk.Text(frm_links, height=6, wrap="none",
                                  font=("monospace", 10), undo=True)
         self.txt_links.pack(fill="x", padx=6, pady=6)
-        ttk.Label(frm_links, text="Папка, глава, вся серия, галерея, профиль или "
-                  "отдельная работа. Другие сайты тоже можно.",
-                  **grey).pack(anchor="w", padx=6, pady=(0, 6))
+        ttk.Label(frm_links, text=tr(
+            "Папка, глава, вся серия, галерея, профиль или отдельная работа. "
+            "Другие сайты тоже можно.",
+            "A folder, chapter, whole series, gallery, profile or single work. "
+            "Other sites work too."), **grey).pack(anchor="w", padx=6, pady=(0, 6))
 
-        # Куда сохранять
-        frm_dest = ttk.LabelFrame(self.root, text=" Куда сохранять ")
+        # Destination
+        frm_dest = ttk.LabelFrame(self.root, text=tr(" Куда сохранять ",
+                                                     " Save to "))
         frm_dest.pack(fill="x", **pad)
         frm_dest.columnconfigure(1, weight=1)
-        ttk.Label(frm_dest, text="Основная папка:").grid(
+        ttk.Label(frm_dest, text=tr("Основная папка:", "Main folder:")).grid(
             row=0, column=0, sticky="w", padx=6, pady=4)
         ttk.Entry(frm_dest, textvariable=self.var_base).grid(
             row=0, column=1, sticky="ew", padx=6, pady=4)
-        ttk.Button(frm_dest, text="Выбрать…", command=self.choose_base).grid(
-            row=0, column=2, padx=6, pady=4)
-        ttk.Label(frm_dest, text="Название работы:").grid(
+        ttk.Button(frm_dest, text=tr("Выбрать…", "Browse…"),
+                   command=self.choose_base).grid(row=0, column=2, padx=6, pady=4)
+        ttk.Label(frm_dest, text=tr("Название работы:", "Project name:")).grid(
             row=1, column=0, sticky="w", padx=6, pady=4)
         ttk.Entry(frm_dest, textvariable=self.var_name).grid(
             row=1, column=1, sticky="ew", padx=6, pady=4)
-        ttk.Label(frm_dest, text="(станет подпапкой)", **grey).grid(
-            row=1, column=2, sticky="w", padx=6)
+        ttk.Label(frm_dest, text=tr("(станет подпапкой)", "(becomes a subfolder)"),
+                  **grey).grid(row=1, column=2, sticky="w", padx=6)
 
-        # Вход
-        frm_auth = ttk.LabelFrame(self.root, text=" Вход в DeviantArt (для 18+) ")
+        # Sign-in
+        frm_auth = ttk.LabelFrame(self.root, text=tr(
+            " Вход в DeviantArt (для 18+) ", " DeviantArt sign-in (for 18+) "))
         frm_auth.pack(fill="x", **pad)
         frm_auth.columnconfigure(1, weight=1)
         frm_auth.columnconfigure(3, weight=1)
-        ttk.Label(frm_auth, text="Логин:").grid(
+        ttk.Label(frm_auth, text=tr("Логин:", "Username:")).grid(
             row=0, column=0, sticky="w", padx=6, pady=4)
         ttk.Entry(frm_auth, textvariable=self.var_user).grid(
             row=0, column=1, sticky="ew", padx=6, pady=4)
-        ttk.Label(frm_auth, text="Пароль:").grid(
+        ttk.Label(frm_auth, text=tr("Пароль:", "Password:")).grid(
             row=0, column=2, sticky="w", padx=6, pady=4)
         ttk.Entry(frm_auth, textvariable=self.var_pass, show="•").grid(
             row=0, column=3, sticky="ew", padx=6, pady=4)
-        ttk.Label(frm_auth, text="Или вход из браузера:").grid(
+        ttk.Label(frm_auth, text=tr("Или вход из браузера:",
+                                    "Or cookies from browser:")).grid(
             row=1, column=0, sticky="w", padx=6, pady=4)
-        ttk.Combobox(frm_auth, textvariable=self.var_browser, values=BROWSERS,
-                     state="readonly", width=20).grid(
-            row=1, column=1, sticky="w", padx=6, pady=4)
-        self.btn_connect = ttk.Button(frm_auth, text="🔑 Подключить DeviantArt",
-                                      command=self.connect_deviantart)
+        self.cmb_browser = KeyedCombo(frm_auth, BROWSER_KEYS, browser_label,
+                                      self.browser_key)
+        self.cmb_browser.widget.grid(row=1, column=1, sticky="w", padx=6, pady=4)
+        self.btn_connect = ttk.Button(
+            frm_auth, text=tr("🔑 Подключить DeviantArt", "🔑 Connect DeviantArt"),
+            command=self.connect_deviantart)
         self.btn_connect.grid(row=1, column=2, columnspan=2, sticky="e",
                               padx=6, pady=4)
         ttk.Label(frm_auth, textvariable=self.var_connected, **grey).grid(
             row=2, column=0, columnspan=4, sticky="w", padx=6, pady=(0, 6))
 
-        # Настройки
-        frm_opt = ttk.LabelFrame(self.root, text=" Настройки ")
+        # Settings
+        frm_opt = ttk.LabelFrame(self.root, text=tr(" Настройки ", " Settings "))
         frm_opt.pack(fill="x", **pad)
-        ttk.Label(frm_opt, text="Порядок номеров:").grid(
+        ttk.Label(frm_opt, text=tr("Порядок номеров:", "Numbering order:")).grid(
             row=0, column=0, sticky="w", padx=6, pady=4)
-        ttk.Combobox(frm_opt, textvariable=self.var_order, values=ORDER_MODES,
-                     state="readonly", width=20).grid(
-            row=0, column=1, sticky="w", padx=6, pady=4)
-        ttk.Label(frm_opt, text="файлы: 001 - …, 002 - …",
+        self.cmb_order = KeyedCombo(frm_opt, ORDER_KEYS, order_label,
+                                    self.order_key)
+        self.cmb_order.widget.grid(row=0, column=1, sticky="w", padx=6, pady=4)
+        ttk.Label(frm_opt, text=tr("файлы: 001 - …, 002 - …",
+                                   "files: 001 - …, 002 - …"),
                   **grey).grid(row=0, column=2, sticky="w")
-        ttk.Label(frm_opt, text="Скачивать одновременно:").grid(
+        ttk.Label(frm_opt, text=tr("Скачивать одновременно:",
+                                   "Parallel downloads:")).grid(
             row=1, column=0, sticky="w", padx=6, pady=4)
         ttk.Spinbox(frm_opt, from_=1, to=MAX_THREADS, width=4, state="readonly",
                     textvariable=self.var_threads).grid(
             row=1, column=1, sticky="w", padx=6, pady=4)
-        ttk.Label(frm_opt, text="потоков (3 — оптимально)", **grey).grid(
-            row=1, column=2, sticky="w")
+        ttk.Label(frm_opt, text=tr("потоков (3 — оптимально)",
+                                   "threads (3 is optimal)"),
+                  **grey).grid(row=1, column=2, sticky="w")
         ttk.Checkbutton(
             frm_opt, variable=self.var_retry,
-            text="Повторить то, что не скачалось с первого раза"
+            text=tr("Повторить то, что не скачалось с первого раза",
+                    "Retry anything that failed the first time")
         ).grid(row=2, column=0, columnspan=3, sticky="w", padx=6, pady=2)
         ttk.Checkbutton(
             frm_opt, variable=self.var_sort,
-            text="Если в одной папке несколько глав — разнести по Chapter 01, 02 …"
+            text=tr("Если в одной папке несколько глав — разнести по "
+                    "Chapter 01, 02 …",
+                    "If one folder has several chapters, split into "
+                    "Chapter 01, 02 …")
         ).grid(row=3, column=0, columnspan=3, sticky="w", padx=6, pady=(2, 6))
 
-        # Кнопки
+        # Buttons
         frm_btn = ttk.Frame(self.root)
         frm_btn.pack(fill="x", **pad)
-        self.btn_start = ttk.Button(frm_btn, text="⬇  Скачать",
+        self.btn_start = ttk.Button(frm_btn, text=tr("⬇  Скачать", "⬇  Download"),
                                     style="Big.TButton", command=self.start)
         self.btn_start.pack(side="left")
-        self.btn_stop = ttk.Button(frm_btn, text="■  Стоп",
+        self.btn_stop = ttk.Button(frm_btn, text=tr("■  Стоп", "■  Stop"),
                                    command=self.stop, state="disabled")
         self.btn_stop.pack(side="left", padx=8)
-        ttk.Button(frm_btn, text="Упорядочить файлы",
+        ttk.Button(frm_btn, text=tr("Упорядочить файлы", "Organize files"),
                    command=self.organize_now).pack(side="left")
-        ttk.Button(frm_btn, text="Открыть папку",
+        ttk.Button(frm_btn, text=tr("Открыть папку", "Open folder"),
                    command=self.open_folder).pack(side="right")
 
-        # Статус
+        # Status
         frm_status = ttk.Frame(self.root)
         frm_status.pack(fill="x", **pad)
         self.progress = ttk.Progressbar(frm_status, mode="indeterminate")
@@ -485,8 +587,8 @@ class App:
         ttk.Label(row, textvariable=self.var_stats,
                   font=("TkDefaultFont", 10, "bold")).pack(side="right")
 
-        # Журнал
-        frm_log = ttk.LabelFrame(self.root, text=" Журнал ")
+        # Log
+        frm_log = ttk.LabelFrame(self.root, text=tr(" Журнал ", " Log "))
         frm_log.pack(fill="both", expand=True, **pad)
         self.txt_log = tk.Text(frm_log, height=8, wrap="none", state="disabled",
                                font=("monospace", 9), background="#1e1e1e",
@@ -500,7 +602,53 @@ class App:
         self.txt_log.tag_configure("skip", foreground="#808080")
         self.txt_log.tag_configure("info", foreground="#75beff")
 
-    # ---------- настройки ----------
+    def refresh_texts(self):
+        """Texts that live in variables (status, counters, sign-in hint)."""
+        self.update_connected()
+        if self.stats != {"done": 0, "skip": 0, "err": 0}:
+            self.update_stats()
+        if not self.running:
+            self.var_status.set(tr("Готово к работе", "Ready"))
+
+    def change_language(self, _event=None):
+        new = self.cmb_lang.get()
+        if new == get_lang():
+            return
+        if self.running:
+            messagebox.showinfo(APP_TITLE, tr(
+                "Язык можно сменить, когда скачивание закончится.",
+                "You can change the language after the download finishes."))
+            self.cmb_lang.key = get_lang()
+            self.cmb_lang.var.set(LANGUAGES[get_lang()])
+            return
+        self.browser_key = self.cmb_browser.get()
+        self.order_key = self.cmb_order.get()
+        links = self.txt_links.get("1.0", "end-1c")
+        log_dump = self.txt_log.dump("1.0", "end-1c", text=True, tag=True)
+        set_lang(new)
+        for w in self.root.winfo_children():
+            w.destroy()
+        self.build_ui()
+        self.txt_links.insert("1.0", links)
+        self.restore_log(log_dump)
+        self.refresh_texts()
+        self.save_config()
+
+    def restore_log(self, dump):
+        """Puts the old log back with its colors after rebuilding the UI."""
+        self.txt_log.configure(state="normal")
+        tags = []
+        for kind, value, _index in dump:
+            if kind == "tagon":
+                tags.append(value)
+            elif kind == "tagoff" and value in tags:
+                tags.remove(value)
+            elif kind == "text":
+                self.txt_log.insert("end", value, tuple(tags))
+        self.txt_log.see("end")
+        self.txt_log.configure(state="disabled")
+
+    # ---------- settings ----------
 
     def load_config(self):
         try:
@@ -509,15 +657,16 @@ class App:
             return {}
 
     def save_config(self):
-        """Сохраняет настройки. Пароль — никогда."""
+        """Saves settings. Never the password."""
         try:
             CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
             CONFIG_PATH.write_text(json.dumps({
+                "lang": get_lang(),
                 "base": self.var_base.get(),
-                "browser": self.var_browser.get(),
+                "browser": self.cmb_browser.get(),
                 "username": self.var_user.get().strip(),
                 "threads": self.threads(),
-                "order": self.var_order.get(),
+                "order": self.cmb_order.get(),
                 "retry": self.var_retry.get(),
                 "sort": self.var_sort.get(),
                 "da_connected": self.da_connected,
@@ -525,15 +674,20 @@ class App:
         except OSError:
             pass
 
-    # ---------- вспомогательное ----------
+    # ---------- helpers ----------
 
     def update_connected(self):
         if self.da_connected:
-            self.var_connected.set("✔ DeviantArt подключён — работы 18+ "
-                                   "скачиваются в полном качестве.")
+            self.var_connected.set(tr(
+                "✔ DeviantArt подключён — работы 18+ скачиваются в полном "
+                "качестве.",
+                "✔ DeviantArt connected — 18+ works download in full quality."))
         else:
-            self.var_connected.set("Для 18+ один раз нажми «Подключить "
-                                   "DeviantArt». Пароль не сохраняется.")
+            self.var_connected.set(tr(
+                "Для 18+ один раз нажми «Подключить DeviantArt». Пароль не "
+                "сохраняется.",
+                "For 18+ works click “Connect DeviantArt” once. No password "
+                "is stored."))
 
     def threads(self):
         try:
@@ -544,9 +698,11 @@ class App:
     def check_gallery_dl(self):
         self.gdl = find_gallery_dl()
         if self.gdl:
-            self.log(f"gallery-dl найден: {self.gdl}", "info")
+            self.log(tr(f"gallery-dl найден: {self.gdl}",
+                        f"gallery-dl found: {self.gdl}"), "info")
         else:
-            self.log("gallery-dl не найден! Установи: pipx install gallery-dl",
+            self.log(tr("gallery-dl не найден! Установи: pipx install gallery-dl",
+                        "gallery-dl not found! Install it: pipx install gallery-dl"),
                      "err")
 
     def dest_folder(self):
@@ -573,33 +729,41 @@ class App:
 
     def update_stats(self):
         s = self.stats
-        self.var_stats.set(f"Скачано: {s['done']}   Пропущено: {s['skip']}   "
-                           f"Ошибок: {s['err']}")
+        self.var_stats.set(tr(
+            f"Скачано: {s['done']}   Пропущено: {s['skip']}   Ошибок: {s['err']}",
+            f"Downloaded: {s['done']}   Skipped: {s['skip']}   Errors: {s['err']}"))
 
     def set_running(self, running):
-        self.btn_connect.configure(state="disabled" if running else "normal")
-        self.btn_start.configure(state="disabled" if running else "normal")
+        self.running = running
+        state = "disabled" if running else "normal"
+        self.btn_connect.configure(state=state)
+        self.btn_start.configure(state=state)
         self.btn_stop.configure(state="normal" if running else "disabled")
+        self.cmb_lang.widget.configure(state="disabled" if running else "readonly")
         if running:
             self.progress.start(12)
         else:
             self.progress.stop()
 
-    # ---------- кнопки ----------
+    # ---------- buttons ----------
 
     def start(self):
         if not self.gdl:
-            messagebox.showerror(APP_TITLE, "gallery-dl не найден.\n"
-                                 "Установи его: pipx install gallery-dl")
+            messagebox.showerror(APP_TITLE, tr(
+                "gallery-dl не найден.\nУстанови его: pipx install gallery-dl",
+                "gallery-dl not found.\nInstall it: pipx install gallery-dl"))
             return
         urls = parse_urls(self.txt_links.get("1.0", "end"))
         if not urls:
-            messagebox.showinfo(APP_TITLE, "Вставь хотя бы одну ссылку.")
+            messagebox.showinfo(APP_TITLE, tr("Вставь хотя бы одну ссылку.",
+                                              "Paste at least one link."))
             return
         user, pwd = self.var_user.get().strip(), self.var_pass.get()
         if bool(user) != bool(pwd):
-            messagebox.showinfo(APP_TITLE, "Для входа нужны и логин, и пароль.\n"
-                                "Или оставь оба поля пустыми.")
+            messagebox.showinfo(APP_TITLE, tr(
+                "Для входа нужны и логин, и пароль.\nИли оставь оба поля пустыми.",
+                "Sign-in needs both username and password.\n"
+                "Or leave both fields empty."))
             return
         dest = self.dest_folder()
         dest.mkdir(parents=True, exist_ok=True)
@@ -611,26 +775,31 @@ class App:
         self.update_stats()
         self.stop_flag.clear()
         self.set_running(True)
-        self.log(f"— Начинаю: {len(urls)} ссылок → {dest}", "info")
+        self.log(tr(f"— Начинаю: {len(urls)} ссылок → {dest}",
+                    f"— Starting: {len(urls)} links → {dest}"), "info")
 
         self.worker = threading.Thread(
             target=self.run_job,
-            args=(urls, dest, self.var_browser.get(), user, pwd,
-                  self.threads(), self.var_order.get(),
+            args=(urls, dest, self.cmb_browser.get(), user, pwd,
+                  self.threads(), self.cmb_order.get(),
                   self.var_retry.get(), self.var_sort.get()),
             daemon=True)
         self.worker.start()
 
     def connect_deviantart(self):
-        """Разрешение для gallery-dl от имени аккаунта (OAuth), один раз."""
+        """Grants gallery-dl access on behalf of the account (OAuth), once."""
         if not self.gdl:
-            messagebox.showerror(APP_TITLE, "gallery-dl не найден.")
+            messagebox.showerror(APP_TITLE, tr("gallery-dl не найден.",
+                                               "gallery-dl not found."))
             return
         self.stop_flag.clear()
         self.set_running(True)
-        self.var_status.set("Жду разрешения в браузере…")
-        self.log("— Подключаю DeviantArt. В браузере откроется страница "
-                 "DeviantArt: войди и нажми «Authorize».", "info")
+        self.var_status.set(tr("Жду разрешения в браузере…",
+                               "Waiting for approval in the browser…"))
+        self.log(tr("— Подключаю DeviantArt. В браузере откроется страница "
+                    "DeviantArt: войди и нажми «Authorize».",
+                    "— Connecting DeviantArt. A DeviantArt page will open in "
+                    "your browser: sign in and click “Authorize”."), "info")
         self.worker = threading.Thread(target=self.run_connect, daemon=True)
         self.worker.start()
 
@@ -639,20 +808,22 @@ class App:
 
         def on_line(line):
             low = line.lower()
-            if "been cached" in low:          # токен сохранён
+            if "been cached" in low:          # token saved
                 ok[0] = True
             elif line.startswith("https://www.deviantart.com/oauth2"):
-                self.emit("log", ("Если браузер не открылся, открой ссылку "
-                                  "вручную:", "info"))
+                self.emit("log", (tr("Если браузер не открылся, открой ссылку "
+                                     "вручную:",
+                                     "If the browser didn't open, open this "
+                                     "link manually:"), "info"))
                 self.emit("log", (line, "info"))
             elif "[error]" in line or "[warning]" in line:
                 self.emit("log", (line, "err"))
-            # остальное (в т.ч. сам токен) в журнал не выводим
+            # everything else (including the token itself) stays out of the log
 
         try:
             self.run_process(["oauth:deviantart"], on_line)
         except Exception as e:
-            self.emit("log", (f"Ошибка: {e}", "err"))
+            self.emit("log", (tr(f"Ошибка: {e}", f"Error: {e}"), "err"))
         self.emit("connected", ok[0])
 
     def stop(self):
@@ -661,12 +832,13 @@ class App:
             for p in self.procs:
                 if p.poll() is None:
                     p.terminate()
-        self.var_status.set("Останавливаю…")
+        self.var_status.set(tr("Останавливаю…", "Stopping…"))
 
     def organize_now(self):
         folder = self.dest_folder()
         if not folder.is_dir():
-            messagebox.showinfo(APP_TITLE, f"Папки пока нет:\n{folder}")
+            messagebox.showinfo(APP_TITLE, tr(f"Папки пока нет:\n{folder}",
+                                              f"Folder doesn't exist yet:\n{folder}"))
             return
         self.report_organized(organize(folder, load_order(folder)))
         if self.var_sort.get():
@@ -675,34 +847,39 @@ class App:
     def report_organized(self, moved):
         if not moved:
             return
-        self.log(f"Разложено по папкам: {sum(moved.values())} файлов", "ok")
+        total = sum(moved.values())
+        self.log(tr(f"Разложено по папкам: {total} файлов",
+                    f"Organized into folders: {total} files"), "ok")
         for name in sorted(moved):
-            label = "основная папка" if name == "." else name
+            label = tr("основная папка", "main folder") if name == "." else name
             self.log(f"   {label}: {moved[name]}", "ok")
 
     def report_sorted(self, moved):
         if not moved:
             return
-        self.log(f"Разнесено по главам: {sum(moved.values())} файлов", "ok")
+        total = sum(moved.values())
+        self.log(tr(f"Разнесено по главам: {total} файлов",
+                    f"Split into chapters: {total} files"), "ok")
         for name in sorted(moved):
             self.log(f"   {name}: {moved[name]}", "ok")
 
     def on_close(self):
         if self.worker and self.worker.is_alive():
-            if not messagebox.askyesno(APP_TITLE,
-                                       "Скачивание ещё идёт. Остановить и выйти?"):
+            if not messagebox.askyesno(APP_TITLE, tr(
+                    "Скачивание ещё идёт. Остановить и выйти?",
+                    "A download is still running. Stop and quit?")):
                 return
             self.stop()
         self.save_config()
         self.root.destroy()
 
-    # ---------- фоновая работа ----------
+    # ---------- background work ----------
 
     def emit(self, kind, payload=None):
         self.events.put((kind, payload))
 
     def run_process(self, args, on_line):
-        """Запускает gallery-dl и построчно передаёт вывод в on_line."""
+        """Runs gallery-dl and passes its output to on_line line by line."""
         env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
         proc = subprocess.Popen(
             [self.gdl] + args, stdout=subprocess.PIPE,
@@ -721,7 +898,7 @@ class App:
                 self.procs.remove(proc)
 
     def run_parallel(self, jobs, n):
-        """Выполняет функции из jobs, не больше n одновременно."""
+        """Runs the functions in jobs, at most n at a time."""
         jobs = list(jobs)
         lock = threading.Lock()
 
@@ -741,7 +918,7 @@ class App:
             t.join()
 
     def collect(self, urls, args, n):
-        """Список работ в каждой ссылке: (index, дата, папка, название)."""
+        """Works in each link: (index, date, folder, title)."""
         results = {}
 
         def make_job(i, url):
@@ -759,8 +936,10 @@ class App:
 
                 self.run_process(args + ["--print", COLLECT_FMT, url], on_line)
                 results[i] = found
-                self.emit("log", (f"   {group_name(None, url)}: работ "
-                                  f"{len(found)}", "info"))
+                self.emit("log", (tr(f"   {group_name(None, url)}: работ "
+                                     f"{len(found)}",
+                                     f"   {group_name(None, url)}: "
+                                     f"{len(found)} works"), "info"))
             return job
 
         self.run_parallel([make_job(i, u) for i, u in enumerate(urls)], n)
@@ -770,7 +949,7 @@ class App:
         return entries
 
     def download_parallel(self, links, inc, archive, args, n):
-        """Делит ссылки на n частей и качает их одновременно."""
+        """Splits links into n parts and downloads them at the same time."""
         parts = split_round_robin(links, n)
         jobs = []
         for i, part in enumerate(parts, 1):
@@ -792,23 +971,27 @@ class App:
         try:
             args = base_args(browser, cfg_path)
             if user:
-                self.emit("log", (f"Вход в DeviantArt как {user}", "info"))
+                self.emit("log", (tr(f"Вход в DeviantArt как {user}",
+                                     f"Signing in to DeviantArt as {user}"),
+                                  "info"))
             inc.mkdir(parents=True, exist_ok=True)
 
-            # 1. Узнаём, какие работы в каждой ссылке и в каком порядке
+            # 1. Find out which works each link holds, and in which order
             to_expand = [u for u in urls if classify_url(u) == "expand"]
             direct = [u for u in urls if u not in to_expand]
             entries = []
             if to_expand:
-                self.emit("status", "Собираю список работ…")
+                self.emit("status", tr("Собираю список работ…",
+                                       "Collecting the list of works…"))
                 entries = self.collect(to_expand, args, n_threads)
                 if self.stop_flag.is_set():
                     result = "stopped"
                     return
+            single_group = tr("Отдельные работы", "Single works")
             for u in direct:
                 idx = deviation_id(u)
                 if idx:
-                    entries.append((idx, 0, SINGLE_GROUP, ""))
+                    entries.append((idx, 0, single_group, ""))
 
             order = build_order(entries, order_mode, load_order(dest))
             save_order(dest, order)
@@ -819,45 +1002,52 @@ class App:
                     seen.add(idx)
                     final.append(f"https://www.deviantart.com/view/{idx}")
             final += [u for u in direct if not deviation_id(u)]
-            self.emit("log", (f"Всего работ: {len(final)}", "info"))
+            self.emit("log", (tr(f"Всего работ: {len(final)}",
+                                 f"Total works: {len(final)}"), "info"))
             if not final:
-                self.emit("log", ("Нечего скачивать — ссылки не найдены.", "err"))
+                self.emit("log", (tr("Нечего скачивать — ссылки не найдены.",
+                                     "Nothing to download — no links found."),
+                                  "err"))
                 result = "error"
                 return
             (dest / LINKS_FILE).write_text("\n".join(final) + "\n",
                                            encoding="utf-8")
 
-            # 2. Скачиваем в несколько потоков
+            # 2. Download in several threads
             archive = dest / ARCHIVE_FILE
             n = min(n_threads, len(final))
-            self.emit("status", f"Скачиваю: {len(final)} ссылок, потоков: {n}…")
+            self.emit("status", tr(f"Скачиваю: {len(final)} ссылок, потоков: {n}…",
+                                   f"Downloading: {len(final)} links, "
+                                   f"{n} threads…"))
             self.download_parallel(final, inc, archive, args, n)
             if self.stop_flag.is_set():
                 result = "stopped"
                 return
 
-            # 3. Повтор неудачных (один поток, спокойно)
+            # 3. Retry failures (one thread, gently)
             if retry:
                 failed = self.take_failed()
                 if failed:
                     again = retry_links(failed, final)
                     self.emit("retry", len(failed))
-                    self.emit("status", f"Повторяю: {len(again)} ссылок…")
+                    self.emit("status", tr(f"Повторяю: {len(again)} ссылок…",
+                                           f"Retrying: {len(again)} links…"))
                     self.download_parallel(again, inc, archive, args, 1)
                     if self.stop_flag.is_set():
                         result = "stopped"
                         return
-        except Exception as e:  # чтобы окно не зависло на ошибке
-            self.emit("log", (f"Ошибка: {e}", "err"))
+        except Exception as e:  # keep the window alive on any error
+            self.emit("log", (tr(f"Ошибка: {e}", f"Error: {e}"), "err"))
             result = "error"
         finally:
-            # 4. Раскладываем по порядку — даже после «Стоп»
+            # 4. Put files in order — even after Stop
             try:
                 self.emit("organized", organize(dest, load_order(dest)))
                 if do_sort:
                     self.emit("sorted", sort_all_chapters(dest))
             except Exception as e:
-                self.emit("log", (f"Не удалось упорядочить: {e}", "err"))
+                self.emit("log", (tr(f"Не удалось упорядочить: {e}",
+                                     f"Could not organize files: {e}"), "err"))
             try:
                 os.remove(cfg_path)
             except OSError:
@@ -865,14 +1055,14 @@ class App:
             self.emit("finish", result)
 
     def take_failed(self):
-        """Забирает список неудачных (из фонового потока, через очередь)."""
+        """Fetches the failure list (from the worker thread, via the queue)."""
         box, done = [], threading.Event()
         self.emit("take_failed", (box, done))
         done.wait(5)
         return box
 
     def handle_line(self, line):
-        """Разбор строки вывода gallery-dl и подсчёт статистики."""
+        """Parses one line of gallery-dl output and updates the counters."""
         if not line.strip():
             return
         low = line.lower()
@@ -886,17 +1076,24 @@ class App:
                 self.failed.append(line.split("Failed to download", 1)[1].strip())
             self.log(line, "err")
             if "authentication" in low or "password" in low or "login" in low:
-                self.log("   ↳ Не удалось войти. Проверь логин и пароль. Если "
-                         "DeviantArt просит капчу — войди в браузере и выбери "
-                         "его в поле «Или вход из браузера».", "err")
+                self.log(tr(
+                    "   ↳ Не удалось войти. Проверь логин и пароль. Если "
+                    "DeviantArt просит капчу — нажми «Подключить DeviantArt».",
+                    "   ↳ Sign-in failed. Check username and password. If "
+                    "DeviantArt asks for a captcha, click “Connect DeviantArt”."),
+                    "err")
         elif "[warning]" in line:
             self.log(line if len(line) < 220 else line[:220] + " …", "err")
             if "cookies" in low and "unable to find" in low:
-                self.log("   ↳ В этом браузере нет входа. Выбери другой браузер "
-                         "или введи логин и пароль.", "err")
+                self.log(tr("   ↳ В этом браузере нет входа. Выбери другой "
+                            "браузер или нажми «Подключить DeviantArt».",
+                            "   ↳ Not signed in with this browser. Pick another "
+                            "browser or click “Connect DeviantArt”."), "err")
             elif "403" in line:
-                self.log("   ↳ Сайт не отдаёт полную картинку. Для 18+ нажми "
-                         "«Подключить DeviantArt», потом «Скачать» ещё раз.",
+                self.log(tr("   ↳ Сайт не отдаёт полную картинку. Для 18+ нажми "
+                            "«Подключить DeviantArt», потом «Скачать» ещё раз.",
+                            "   ↳ The site refuses the full image. For 18+ click "
+                            "“Connect DeviantArt”, then “Download” again."),
                          "err")
         elif line.startswith(("/", "✔ /")):
             self.stats["done"] += 1
@@ -924,7 +1121,8 @@ class App:
                     box.extend(self.failed)
                     done.set()
                 elif kind == "retry":
-                    self.log(f"— Не скачалось {payload}. Пробую ещё раз…", "info")
+                    self.log(tr(f"— Не скачалось {payload}. Пробую ещё раз…",
+                                f"— {payload} failed. Trying again…"), "info")
                     self.failed = []
                     self.stats["err"] = 0
                     self.counting_skips = False
@@ -932,44 +1130,64 @@ class App:
                 elif kind == "finish":
                     self.on_finish(payload)
                 elif kind == "connected":
-                    self.set_running(False)
-                    if payload:
-                        self.da_connected = True
-                        self.save_config()
-                        self.update_connected()
-                        self.var_status.set("DeviantArt подключён!")
-                        self.log("— Готово! DeviantArt подключён. Теперь можно "
-                                 "скачивать, в том числе 18+.", "ok")
-                    else:
-                        self.var_status.set("Не удалось подключить DeviantArt")
-                        self.log("— Подключение не завершилось. Попробуй ещё "
-                                 "раз и нажми «Authorize» в браузере.", "err")
+                    self.on_connected(payload)
         except queue.Empty:
             pass
         self.root.after(100, self.poll_events)
 
+    def on_connected(self, ok):
+        self.set_running(False)
+        if ok:
+            self.da_connected = True
+            self.save_config()
+            self.update_connected()
+            self.var_status.set(tr("DeviantArt подключён!",
+                                   "DeviantArt connected!"))
+            self.log(tr("— Готово! DeviantArt подключён. Теперь можно "
+                        "скачивать, в том числе 18+.",
+                        "— Done! DeviantArt is connected. You can now "
+                        "download, including 18+ works."), "ok")
+        else:
+            self.var_status.set(tr("Не удалось подключить DeviantArt",
+                                   "Could not connect DeviantArt"))
+            self.log(tr("— Подключение не завершилось. Попробуй ещё раз и "
+                        "нажми «Authorize» в браузере.",
+                        "— Connection didn't finish. Try again and click "
+                        "“Authorize” in the browser."), "err")
+
     def on_finish(self, result):
         self.set_running(False)
         if result == "stopped":
-            self.var_status.set("Остановлено. Нажми «Скачать» — продолжит с места.")
-            self.log("— Остановлено. Повторный запуск докачает недостающее.", "info")
+            self.var_status.set(tr(
+                "Остановлено. Нажми «Скачать» — продолжит с места.",
+                "Stopped. Click “Download” to resume."))
+            self.log(tr("— Остановлено. Повторный запуск докачает недостающее.",
+                        "— Stopped. Running again downloads only what's "
+                        "missing."), "info")
             return
         if result == "error":
-            self.var_status.set("Ошибка — смотри журнал")
+            self.var_status.set(tr("Ошибка — смотри журнал",
+                                   "Error — see the log"))
             return
         if self.failed:
-            self.var_status.set(f"Готово, но не скачалось: {len(self.failed)}")
-            self.log(f"Не скачались ({len(self.failed)}). Обычно это работы "
-                     "по подписке или 18+ без входа в аккаунт:", "err")
+            n = len(self.failed)
+            self.var_status.set(tr(f"Готово, но не скачалось: {n}",
+                                   f"Done, but {n} failed"))
+            self.log(tr(f"Не скачались ({n}). Обычно это работы по подписке "
+                        "или 18+ без входа в аккаунт:",
+                        f"Not downloaded ({n}). Usually subscription-only "
+                        "works or 18+ without signing in:"), "err")
             for name in self.failed:
                 self.log("   " + pretty_name(name), "err")
         else:
-            self.var_status.set("Готово! Всё скачалось.")
-            self.log("— Готово! Всё скачалось.", "ok")
+            self.var_status.set(tr("Готово! Всё скачалось.",
+                                   "Done! Everything downloaded."))
+            self.log(tr("— Готово! Всё скачалось.",
+                        "— Done! Everything downloaded."), "ok")
 
 
 def main():
-    root = tk.Tk(className="art-downloader")   # для значка в панели задач
+    root = tk.Tk(className="art-downloader")   # matches the menu icon
     App(root)
     root.mainloop()
 

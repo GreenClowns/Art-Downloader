@@ -1,10 +1,10 @@
 #!/bin/bash
 # ============================================================
-#  Установщик Art Downloader для Linux (проверено на Fedora)
+#  Art Downloader installer for Linux (tested on Fedora)
 #
-#  Установка:  bash install.sh
-#  Удаление:   bash install.sh удалить
-#              (или правый клик по значку → «Удалить Art Downloader»)
+#  Install:    bash install.sh
+#  Uninstall:  bash install.sh uninstall   (or: bash install.sh удалить)
+#              or right-click the menu icon → "Uninstall Art Downloader"
 # ============================================================
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,25 +14,34 @@ DESKTOP="$DESKTOP_DIR/art-downloader.desktop"
 ICON_DIR="$HOME/.local/share/icons/hicolor/scalable/apps"
 ICON="$ICON_DIR/art-downloader.svg"
 
+# Messages in Russian for ru/uk/be/kk locales, English otherwise
+LOCALE="${LANGUAGE:-${LC_ALL:-${LC_MESSAGES:-${LANG:-en}}}}"
+case "${LOCALE:0:2}" in ru|uk|be|kk) RU=1 ;; *) RU= ;; esac
+t() { if [[ -n "$RU" ]]; then echo "$1"; else echo "$2"; fi; }
+
 remove_app() {
     rm -rf "$APP_DIR"
     rm -f "$DESKTOP" "$ICON"
     update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
 }
 
-if [[ "$1" == "удалить" || "$1" == "--uninstall" ]]; then
-    remove_app
-    echo "Art Downloader удалён. Скачанные картинки и gallery-dl не тронуты."
-    exit 0
-fi
+case "$1" in
+    uninstall|--uninstall|удалить)
+        remove_app
+        t "Art Downloader удалён. Скачанные картинки и gallery-dl не тронуты." \
+          "Art Downloader uninstalled. Your downloads and gallery-dl were not touched."
+        exit 0 ;;
+esac
 
 if [[ ! -f "$SRC_DIR/art_downloader.py" || ! -f "$SRC_DIR/assets/icon.svg" ]]; then
-    echo "✘ Не нашёл файлы программы рядом с install.sh."
-    echo "  Запускай install.sh из распакованной папки проекта."
+    t "✘ Не нашёл файлы программы рядом с install.sh." \
+      "✘ Program files not found next to install.sh."
+    t "  Запускай install.sh из распакованной папки проекта." \
+      "  Run install.sh from the unpacked project folder."
     exit 1
 fi
 
-# Установщик пакетов: dnf (Fedora) или apt (Ubuntu/Debian)
+# Package manager: dnf (Fedora) or apt (Ubuntu/Debian)
 if command -v dnf >/dev/null 2>&1; then
     PKG_INSTALL="sudo dnf install -y"; TK_PKG="python3-tkinter"
 elif command -v apt-get >/dev/null 2>&1; then
@@ -43,39 +52,42 @@ fi
 
 need_pkg() {
     if [[ -z "$PKG_INSTALL" ]]; then
-        echo "✘ Установи пакет $1 вручную и запусти install.sh ещё раз."
+        t "✘ Установи пакет $1 вручную и запусти install.sh ещё раз." \
+          "✘ Please install the $1 package manually and run install.sh again."
         exit 1
     fi
-    $PKG_INSTALL "$1" || { echo "✘ Не удалось установить $1"; exit 1; }
+    $PKG_INSTALL "$1" || { t "✘ Не удалось установить $1" "✘ Could not install $1"; exit 1; }
 }
 
 echo
-echo "=== Установка Art Downloader ==="
+t "=== Установка Art Downloader ===" "=== Installing Art Downloader ==="
 echo
 
-# 1. Библиотека для окон
+# 1. GUI library
 if python3 -c "import tkinter" 2>/dev/null; then
-    echo "✔ tkinter уже установлен"
+    t "✔ tkinter уже установлен" "✔ tkinter is already installed"
 elif [[ -n "$ARTDL_SKIP_DEPS" ]]; then
-    echo "• tkinter пропущен (тест)"
+    echo "• tkinter skipped (test)"
 else
-    echo "• Ставлю $TK_PKG (может спросить пароль от компьютера)…"
+    t "• Ставлю $TK_PKG (может спросить пароль от компьютера)…" \
+      "• Installing $TK_PKG (may ask for your computer password)…"
     need_pkg "$TK_PKG"
 fi
 
 # 2. gallery-dl
 if command -v gallery-dl >/dev/null 2>&1 || [[ -x "$HOME/.local/bin/gallery-dl" ]]; then
-    echo "✔ gallery-dl уже установлен"
+    t "✔ gallery-dl уже установлен" "✔ gallery-dl is already installed"
 elif [[ -n "$ARTDL_SKIP_DEPS" ]]; then
-    echo "• gallery-dl пропущен (тест)"
+    echo "• gallery-dl skipped (test)"
 else
-    echo "• Ставлю gallery-dl…"
+    t "• Ставлю gallery-dl…" "• Installing gallery-dl…"
     command -v pipx >/dev/null 2>&1 || need_pkg pipx
-    pipx install gallery-dl || { echo "✘ Не удалось установить gallery-dl"; exit 1; }
+    pipx install gallery-dl || { t "✘ Не удалось установить gallery-dl" \
+                                   "✘ Could not install gallery-dl"; exit 1; }
     pipx ensurepath >/dev/null 2>&1 || true
 fi
 
-# 3. Программа, значок, ярлык в меню
+# 3. App, icon, menu entry
 mkdir -p "$APP_DIR" "$DESKTOP_DIR" "$ICON_DIR"
 cp "$SRC_DIR/art_downloader.py" "$APP_DIR/art_downloader.py"
 cp "$SRC_DIR/assets/icon.svg" "$ICON"
@@ -91,7 +103,8 @@ cat > "$DESKTOP" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Art Downloader
-Comment=Скачивание артов и комиксов с DeviantArt и других сайтов
+Comment=Download art and comics from DeviantArt and other sites
+Comment[ru]=Скачивание артов и комиксов с DeviantArt и других сайтов
 Exec=python3 $APP_DIR/art_downloader.py
 Icon=$ICON
 Terminal=false
@@ -100,21 +113,24 @@ StartupWMClass=art-downloader
 Actions=uninstall;
 
 [Desktop Action uninstall]
-Name=Удалить Art Downloader
+Name=Uninstall Art Downloader
+Name[ru]=Удалить Art Downloader
 Exec=bash $APP_DIR/uninstall.sh
 EOF
 
 chmod +x "$DESKTOP"
 update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
 
-echo "✔ Программа установлена"
+t "✔ Программа установлена" "✔ App installed"
 echo
-echo "Открывай «Art Downloader» из меню приложений:"
-echo "нажми клавишу Super (со значком Windows) и начни вводить «Art»."
+t "Открывай «Art Downloader» из меню приложений:" \
+  "Open “Art Downloader” from your applications menu:"
+t "нажми клавишу Super (со значком Windows) и начни вводить «Art»." \
+  "press the Super key (Windows logo) and start typing “Art”."
 echo
 
 if [[ -z "$ARTDL_SKIP_DEPS" ]]; then
     nohup python3 "$APP_DIR/art_downloader.py" >/dev/null 2>&1 &
     disown 2>/dev/null || true
-    echo "Сейчас программа откроется сама."
+    t "Сейчас программа откроется сама." "The app will open now."
 fi
