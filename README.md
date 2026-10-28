@@ -105,7 +105,7 @@ The whole app is a single file, [`art_downloader.py`](art_downloader.py) (Python
 python3 -m pytest
 ```
 
-The Windows build is made by GitHub Actions ([`windows.yml`](.github/workflows/windows.yml)): PyInstaller bundles the app together with gallery-dl, Inno Setup makes the installer. Pushing a tag such as `v1.0.0` publishes a release. Icons are generated from the logo with `python3 tools/make_icons.py`.
+The Windows build is made by GitHub Actions ([`windows.yml`](.github/workflows/windows.yml)): PyInstaller bundles the app together with gallery-dl, Inno Setup makes the installer. Publishing a GitHub Release with a tag such as `v1.0.0` builds it and attaches the files. Icons are generated from the logo with `python3 tools/make_icons.py`.
 
 ## Respect the artists
 

@@ -105,7 +105,7 @@ bash install.sh удалить
 python3 -m pytest
 ```
 
-Версию для Windows собирает GitHub Actions ([`windows.yml`](.github/workflows/windows.yml)): PyInstaller упаковывает программу вместе с gallery-dl, Inno Setup делает установщик. Метка вроде `v1.0.0` публикует выпуск. Значки делаются из логотипа командой `python3 tools/make_icons.py`.
+Версию для Windows собирает GitHub Actions ([`windows.yml`](.github/workflows/windows.yml)): PyInstaller упаковывает программу вместе с gallery-dl, Inno Setup делает установщик. Выпуск (Release) с меткой вроде `v1.0.0` автоматически собирается, и файлы прикрепляются к нему. Значки делаются из логотипа командой `python3 tools/make_icons.py`.
 
 ## Уважай авторов
 

@@ -1,13 +1,15 @@
 name: windows
 
 # Builds the Windows app. Every push to main produces a test build
-# (Actions → windows → Artifacts). Pushing a tag like v1.2.3 also
-# publishes a GitHub Release with the installer and the portable ZIP.
+# (Actions → windows → Artifacts). Publishing a GitHub Release with a tag
+# like v1.2.3 builds that version and attaches the installer and the
+# portable ZIP to the release.
 
 on:
   push:
     branches: [main]
-    tags: ["v*"]
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -84,11 +86,10 @@ jobs:
             dist/*-Setup.exe
             dist/*-portable.zip
 
-      - name: Publish release
-        if: github.ref_type == 'tag'
+      - name: Attach files to the release
+        if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*-Setup.exe
             dist/*-portable.zip
-          generate_release_notes: true
