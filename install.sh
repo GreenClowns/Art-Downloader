@@ -43,7 +43,8 @@ case "$1" in
         exit 0 ;;
 esac
 
-if [[ ! -f "$SRC_DIR/art_downloader.py" || ! -f "$SRC_DIR/assets/icon.png" ]]; then
+if [[ ! -f "$SRC_DIR/art_downloader.py" || ! -f "$SRC_DIR/assets/icon.png" \
+      || ! -f "$SRC_DIR/requirements.txt" ]]; then
     t "✘ Не нашёл файлы программы рядом с install.sh." \
       "✘ Program files not found next to install.sh."
     t "  Запускай install.sh из распакованной папки проекта." \
@@ -84,19 +85,26 @@ else
     need_pkg "$TK_PKG"
 fi
 
-# 2. gallery-dl
-if command -v gallery-dl >/dev/null 2>&1 || [[ -x "$HOME/.local/bin/gallery-dl" ]]; then
-    t "✔ gallery-dl уже установлен" "✔ gallery-dl is already installed"
-elif [[ -n "$ARTDL_SKIP_DEPS" ]]; then
-    echo "• gallery-dl skipped (test)"
-else
-    t "• Ставлю gallery-dl…" "• Installing gallery-dl…"
-    command -v pipx >/dev/null 2>&1 || need_pkg pipx
-    GDL_PIN="$(grep -i -m1 '^gallery-dl==' "$SRC_DIR/requirements.txt")"
-    pipx install "${GDL_PIN:-gallery-dl}" || { t "✘ Не удалось установить gallery-dl" \
-                                   "✘ Could not install gallery-dl"; exit 1; }
-    pipx ensurepath >/dev/null 2>&1 || true
+# 2. The app's own Python environment with its libraries
+#    (separate from system Python, so system updates can't break it)
+VENV="$APP_DIR/venv"
+mkdir -p "$APP_DIR"
+if [[ ! -x "$VENV/bin/python" ]]; then
+    if ! python3 -m venv "$VENV" 2>/dev/null; then
+        rm -rf "$VENV"
+        [[ "$TK_PKG" == "python3-tk" ]] && need_pkg python3-venv
+        python3 -m venv "$VENV" || { t "✘ Не удалось создать окружение Python" \
+                                       "✘ Could not create the Python environment"; exit 1; }
+    fi
 fi
+t "• Ставлю библиотеки (customtkinter, gallery-dl)…" \
+  "• Installing libraries (customtkinter, gallery-dl)…"
+"$VENV/bin/python" -m pip install --quiet --upgrade pip >/dev/null 2>&1 || true
+"$VENV/bin/python" -m pip install --quiet --upgrade -r "$SRC_DIR/requirements.txt" \
+    || { t "✘ Не удалось установить библиотеки. Проверь интернет и запусти ещё раз." \
+           "✘ Could not install the libraries. Check your internet and try again."
+         exit 1; }
+t "✔ Библиотеки установлены" "✔ Libraries installed"
 
 # 3. App, icon, menu entry
 mkdir -p "$APP_DIR" "$DESKTOP_DIR" "$ICON_DIR"
@@ -118,7 +126,7 @@ Type=Application
 Name=Art Downloader
 Comment=Download art and comics from DeviantArt and other sites
 Comment[ru]=Скачивание артов и комиксов с DeviantArt и других сайтов
-Exec=python3 $APP_DIR/art_downloader.py
+Exec=$VENV/bin/python $APP_DIR/art_downloader.py
 Icon=$ICON
 Terminal=false
 Categories=Network;Graphics;
@@ -143,7 +151,7 @@ t "нажми клавишу Super (со значком Windows) и начни �
 echo
 
 if [[ -z "$ARTDL_SKIP_DEPS" ]]; then
-    nohup python3 "$APP_DIR/art_downloader.py" >/dev/null 2>&1 &
+    nohup "$VENV/bin/python" "$APP_DIR/art_downloader.py" >/dev/null 2>&1 &
     disown 2>/dev/null || true
     t "Сейчас программа откроется сама." "The app will open now."
 fi
