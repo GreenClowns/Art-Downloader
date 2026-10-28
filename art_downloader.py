@@ -30,7 +30,17 @@ import tempfile
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox
+
+if os.name != "nt" and sys.platform != "darwin":
+    # CustomTkinter copies its shape font into ~/.fonts on Linux and draws
+    # rounded corners poorly if that folder doesn't exist yet
+    try:
+        os.makedirs(os.path.expanduser("~/.fonts"), exist_ok=True)
+    except OSError:
+        pass
+
+import customtkinter as ctk  # noqa: E402
 
 APP_TITLE = "Art Downloader"
 WINDOWS = os.name == "nt"
@@ -45,9 +55,6 @@ else:
 DEFAULT_BASE = Path.home() / "ArtDownloads"
 MAX_THREADS = 5
 MONO_FONT = "Consolas" if WINDOWS else "monospace"
-# Tk on Windows can't always draw emoji outside the basic plane
-GLOBE = "" if WINDOWS else "🌐"
-KEY = "" if WINDOWS else "🔑 "
 CREATE_NO_WINDOW = 0x08000000               # hide console windows on Windows
 
 BROWSER_KEYS = ["firefox", "chrome", "chromium", "none"]
@@ -172,6 +179,8 @@ def find_gallery_dl():
     """
     if FROZEN:
         return [sys.executable, GALLERY_DL_FLAG]
+    if importlib.util.find_spec("gallery_dl"):   # e.g. the app's own venv
+        return [sys.executable, "-m", "gallery_dl"]
     found = shutil.which("gallery-dl")
     if found:
         return [found]
@@ -703,21 +712,62 @@ def pretty_name(path):
 # Window
 # --------------------------------------------------------------------------
 
-class KeyedCombo:
-    """Read-only combobox that shows translated labels but stores keys."""
+THEME_KEYS = ["system", "light", "dark"]
+ACCENT = ("#16a34a", "#22c55e")            # green from the logo (light, dark)
+ACCENT_HOVER = ("#15803d", "#16a34a")
+DANGER = ("#dc2626", "#ef4444")
+DANGER_HOVER = ("#b91c1c", "#dc2626")
+MUTED = ("#6b7280", "#9ca3af")
+CARD = ("#ffffff", "#1f2124")
+WINDOW_BG = ("#f3f4f6", "#141517")
+LOG_COLORS = {"ok": "#22a35a", "err": "#e5484d", "info": "#3b82f6",
+              "skip": "#8a8f98"}
 
-    def __init__(self, parent, keys, label_fn, key, width=20):
+
+def theme_label(key):
+    return {"system": tr("Как в системе", "System"),
+            "light": tr("Светлая", "Light"),
+            "dark": tr("Тёмная", "Dark")}[key]
+
+
+class KeyedOption:
+    """Option menu that shows translated labels but stores keys."""
+
+    def __init__(self, parent, keys, label_fn, key, width=220):
         self.keys, self.label_fn, self.key = keys, label_fn, key
-        self.var = tk.StringVar(value=label_fn(key))
-        self.widget = ttk.Combobox(parent, textvariable=self.var, width=width,
-                                   values=[label_fn(k) for k in keys],
-                                   state="readonly")
-        self.widget.bind("<<ComboboxSelected>>", self._changed)
+        self.widget = ctk.CTkOptionMenu(
+            parent, width=width, values=[label_fn(k) for k in keys],
+            command=self._changed, fg_color=WINDOW_BG, button_color=WINDOW_BG,
+            button_hover_color=("#e5e7eb", "#2a2c30"),
+            text_color=("#111827", "#f3f4f6"), dynamic_resizing=False)
+        self.widget.set(label_fn(key))
 
-    def _changed(self, _event=None):
+    def _changed(self, label):
         labels = [self.label_fn(k) for k in self.keys]
-        if self.var.get() in labels:
-            self.key = self.keys[labels.index(self.var.get())]
+        if label in labels:
+            self.key = self.keys[labels.index(label)]
+
+    def get(self):
+        return self.key
+
+
+class KeyedSegments:
+    """Segmented button with translated labels that stores keys."""
+
+    def __init__(self, parent, keys, label_fn, key, command=None):
+        self.keys, self.label_fn, self.key = keys, label_fn, key
+        self.command = command
+        self.widget = ctk.CTkSegmentedButton(
+            parent, values=[label_fn(k) for k in keys], command=self._changed,
+            selected_color=ACCENT, selected_hover_color=ACCENT_HOVER)
+        self.widget.set(label_fn(key))
+
+    def _changed(self, label):
+        labels = [self.label_fn(k) for k in self.keys]
+        if label in labels:
+            self.key = self.keys[labels.index(label)]
+            if self.command:
+                self.command(self.key)
 
     def get(self):
         return self.key
@@ -727,9 +777,9 @@ class App:
     def __init__(self, root):
         self.root = root
         self.root.title(APP_TITLE)
-        scale = max(1.0, root.winfo_fpixels("1i") / 96) if WINDOWS else 1.0
-        self.root.geometry(f"{int(860 * scale)}x{int(830 * scale)}")
-        self.root.minsize(int(680 * scale), int(640 * scale))
+        self.root.geometry("900x760")
+        self.root.minsize(720, 620)
+        self.root.configure(fg_color=WINDOW_BG)
         self.set_window_icon()
 
         self.procs = []
@@ -746,17 +796,23 @@ class App:
         set_lang(cfg.get("lang") or detect_lang())
         self.browser_key = cfg["browser"]
         self.order_key = cfg["order"]
+        self.theme_key = cfg.get("theme") if cfg.get("theme") in THEME_KEYS \
+            else "system"
+        ctk.set_appearance_mode(self.theme_key)
         self.var_base = tk.StringVar(value=cfg.get("base", str(DEFAULT_BASE)))
         self.var_name = tk.StringVar(value="")
         self.var_user = tk.StringVar(value=cfg.get("username", ""))
         self.var_pass = tk.StringVar(value="")
-        self.var_threads = tk.IntVar(value=cfg.get("threads", 3))
+        self.var_threads = tk.StringVar(value=str(cfg.get("threads", 3)))
         self.var_sort = tk.BooleanVar(value=cfg.get("sort", True))
         self.var_retry = tk.BooleanVar(value=cfg.get("retry", True))
         self.da_connected = bool(cfg.get("da_connected", False))
         self.var_connected = tk.StringVar()
         self.var_status = tk.StringVar()
         self.var_stats = tk.StringVar(value="")
+        self.var_dest = tk.StringVar()
+        self.var_base.trace_add("write", lambda *_: self.update_dest())
+        self.var_name.trace_add("write", lambda *_: self.update_dest())
 
         self.build_ui()
         self.refresh_texts()
@@ -767,6 +823,11 @@ class App:
     # ---------- interface ----------
 
     def set_window_icon(self):
+        if WINDOWS:
+            ico = resource_path("icon.ico")
+            if ico:   # CustomTkinter sets its own icon first; replace it after
+                self.root.after(300, lambda: self.root.iconbitmap(str(ico)))
+            return
         icon = resource_path("icon.png")
         if not icon:
             return
@@ -776,162 +837,231 @@ class App:
         except tk.TclError:
             pass
 
+    def font(self, size=13, weight="normal", mono=False):
+        if mono:
+            return ctk.CTkFont(family=MONO_FONT, size=size)
+        return ctk.CTkFont(size=size, weight=weight)
+
+    def card(self, parent, **pack):
+        frame = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=12)
+        frame.pack(fill="x", **({"pady": (0, 12)} | pack))
+        return frame
+
+    def heading(self, parent, text, hint=None):
+        ctk.CTkLabel(parent, text=text, font=self.font(15, "bold"),
+                     anchor="w").pack(fill="x", padx=16, pady=(14, 0))
+        if hint:
+            ctk.CTkLabel(parent, text=hint, font=self.font(12),
+                         text_color=MUTED, anchor="w", justify="left",
+                         wraplength=760).pack(fill="x", padx=16, pady=(2, 0))
+
     def build_ui(self):
-        pad = {"padx": 10, "pady": 4}
-        style = ttk.Style()
-        for theme in (("vista", "clam") if WINDOWS else ("clam",)):
+        # forget widgets of a previous build (language change rebuilds all)
+        self.btn_connect = self.btn_da_status = self.cmb_lang = None
+        # Header: logo, title, DeviantArt status
+        header = ctk.CTkFrame(self.root, fg_color="transparent")
+        header.pack(fill="x", padx=20, pady=(16, 4))
+        logo = resource_path("icon.png")
+        if logo:
             try:
-                style.theme_use(theme)
-                break
-            except tk.TclError:
-                continue
-        style.configure("Big.TButton", font=("TkDefaultFont", 11, "bold"),
-                        padding=(14, 6))
-        grey = {"foreground": "#666"}
+                from PIL import Image
+                self._logo = ctk.CTkImage(Image.open(logo), size=(36, 36))
+                ctk.CTkLabel(header, image=self._logo, text="").pack(side="left")
+            except Exception:
+                pass
+        ctk.CTkLabel(header, text=APP_TITLE, font=self.font(22, "bold")).pack(
+            side="left", padx=(10, 0))
+        self.btn_da_status = ctk.CTkButton(
+            header, text="", height=30, corner_radius=15,
+            command=self.connect_deviantart, font=self.font(12, "bold"))
+        self.btn_da_status.pack(side="right")
 
-        # Language
-        frm_top = ttk.Frame(self.root)
-        frm_top.pack(fill="x", padx=10, pady=(6, 0))
-        self.cmb_lang = KeyedCombo(frm_top, list(LANGUAGES), LANGUAGES.get,
-                                   get_lang(), width=10)
-        self.cmb_lang.widget.pack(side="right")
-        self.cmb_lang.widget.bind("<<ComboboxSelected>>", self.change_language,
-                                  add="+")
-        ttk.Label(frm_top, text=GLOBE or "Language / Язык:").pack(
-            side="right", padx=(0, 4))
+        self.tabs = ctk.CTkTabview(
+            self.root, fg_color="transparent", corner_radius=12,
+            segmented_button_selected_color=ACCENT,
+            segmented_button_selected_hover_color=ACCENT_HOVER)
+        self.tabs.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        self.tab_main_name = tr("Загрузка", "Download")
+        self.tab_settings_name = tr("Настройки", "Settings")
+        self.build_main_tab(self.tabs.add(self.tab_main_name))
+        self.build_settings_tab(self.tabs.add(self.tab_settings_name))
+        self.update_dest()
+        self.update_connected()
+        self.set_running(self.running)
 
+    def build_main_tab(self, tab):
         # Links
-        frm_links = ttk.LabelFrame(
-            self.root, text=tr(" Ссылки (по одной на строку) ",
-                               " Links (one per line) "))
-        frm_links.pack(fill="x", **pad)
-        self.txt_links = tk.Text(frm_links, height=6, wrap="none",
-                                 font=(MONO_FONT, 10), undo=True)
-        self.txt_links.pack(fill="x", padx=6, pady=6)
-        ttk.Label(frm_links, text=tr(
-            "Папка, глава, вся серия, галерея, профиль или отдельная работа. "
-            "Другие сайты тоже можно.",
-            "A folder, chapter, whole series, gallery, profile or single work. "
-            "Other sites work too."), **grey).pack(anchor="w", padx=6, pady=(0, 6))
+        links = self.card(tab)
+        self.heading(links, tr("Ссылки", "Links"), tr(
+            "По одной на строку: папка, глава, вся серия, галерея, профиль или "
+            "отдельная работа. Другие сайты тоже можно.",
+            "One per line: a folder, chapter, whole series, gallery, profile or "
+            "single work. Other sites work too."))
+        self.txt_links = ctk.CTkTextbox(links, height=110, wrap="none",
+                                        font=self.font(13, mono=True),
+                                        fg_color=WINDOW_BG, corner_radius=8)
+        self.txt_links.pack(fill="x", padx=16, pady=(8, 16))
 
-        # Destination
-        frm_dest = ttk.LabelFrame(self.root, text=tr(" Куда сохранять ",
-                                                     " Save to "))
-        frm_dest.pack(fill="x", **pad)
-        frm_dest.columnconfigure(1, weight=1)
-        ttk.Label(frm_dest, text=tr("Основная папка:", "Main folder:")).grid(
-            row=0, column=0, sticky="w", padx=6, pady=4)
-        ttk.Entry(frm_dest, textvariable=self.var_base).grid(
-            row=0, column=1, sticky="ew", padx=6, pady=4)
-        ttk.Button(frm_dest, text=tr("Выбрать…", "Browse…"),
-                   command=self.choose_base).grid(row=0, column=2, padx=6, pady=4)
-        ttk.Label(frm_dest, text=tr("Название работы:", "Project name:")).grid(
-            row=1, column=0, sticky="w", padx=6, pady=4)
-        ttk.Entry(frm_dest, textvariable=self.var_name).grid(
-            row=1, column=1, sticky="ew", padx=6, pady=4)
-        ttk.Label(frm_dest, text=tr("(станет подпапкой)", "(becomes a subfolder)"),
-                  **grey).grid(row=1, column=2, sticky="w", padx=6)
+        # Where to save
+        dest = self.card(tab)
+        self.heading(dest, tr("Куда сохранить", "Save to"))
+        row = ctk.CTkFrame(dest, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(8, 0))
+        row.columnconfigure(0, weight=2)
+        row.columnconfigure(1, weight=3)
+        for col, text in ((0, tr("Название работы", "Project name")),
+                          (1, tr("Основная папка", "Main folder"))):
+            ctk.CTkLabel(row, text=text, font=self.font(12), text_color=MUTED,
+                         anchor="w").grid(row=0, column=col, sticky="w")
+        ctk.CTkEntry(row, textvariable=self.var_name, height=36).grid(
+            row=1, column=0, sticky="ew", padx=(0, 8))
+        ctk.CTkEntry(row, textvariable=self.var_base, height=36).grid(
+            row=1, column=1, sticky="ew", padx=(0, 8))
+        ctk.CTkButton(row, text=tr("Выбрать…", "Browse…"), width=100,
+                      height=36, fg_color=WINDOW_BG,
+                      text_color=("#111827", "#f3f4f6"),
+                      hover_color=("#e5e7eb", "#2a2c30"),
+                      command=self.choose_base).grid(row=1, column=2)
+        ctk.CTkLabel(dest, textvariable=self.var_dest, font=self.font(12),
+                     text_color=MUTED, anchor="w").pack(
+            fill="x", padx=16, pady=(6, 14))
 
-        # Sign-in
-        frm_auth = ttk.LabelFrame(self.root, text=tr(
-            " Вход в DeviantArt (для 18+) ", " DeviantArt sign-in (for 18+) "))
-        frm_auth.pack(fill="x", **pad)
-        frm_auth.columnconfigure(1, weight=1)
-        frm_auth.columnconfigure(3, weight=1)
-        ttk.Label(frm_auth, text=tr("Логин:", "Username:")).grid(
-            row=0, column=0, sticky="w", padx=6, pady=4)
-        ttk.Entry(frm_auth, textvariable=self.var_user).grid(
-            row=0, column=1, sticky="ew", padx=6, pady=4)
-        ttk.Label(frm_auth, text=tr("Пароль:", "Password:")).grid(
-            row=0, column=2, sticky="w", padx=6, pady=4)
-        ttk.Entry(frm_auth, textvariable=self.var_pass, show="•").grid(
-            row=0, column=3, sticky="ew", padx=6, pady=4)
-        ttk.Label(frm_auth, text=tr("Или вход из браузера:",
-                                    "Or cookies from browser:")).grid(
-            row=1, column=0, sticky="w", padx=6, pady=4)
-        self.cmb_browser = KeyedCombo(frm_auth, BROWSER_KEYS, browser_label,
-                                      self.browser_key)
-        self.cmb_browser.widget.grid(row=1, column=1, sticky="w", padx=6, pady=4)
-        self.btn_connect = ttk.Button(
-            frm_auth, text=KEY + tr("Подключить DeviantArt", "Connect DeviantArt"),
-            command=self.connect_deviantart)
-        self.btn_connect.grid(row=1, column=2, columnspan=2, sticky="e",
-                              padx=6, pady=4)
-        ttk.Label(frm_auth, textvariable=self.var_connected, **grey).grid(
-            row=2, column=0, columnspan=4, sticky="w", padx=6, pady=(0, 6))
+        # Big button + progress
+        self.btn_start = ctk.CTkButton(
+            tab, text="", height=50, corner_radius=12,
+            font=self.font(17, "bold"), command=self.toggle_start)
+        self.btn_start.pack(fill="x", pady=(2, 10))
+        self.progress = ctk.CTkProgressBar(tab, mode="indeterminate", height=6,
+                                           progress_color=ACCENT,
+                                           fg_color=("#e5e7eb", "#2a2c30"))
+        self.progress.pack(fill="x", padx=2)
+        self.progress.set(0)
 
-        # Settings
-        frm_opt = ttk.LabelFrame(self.root, text=tr(" Настройки ", " Settings "))
-        frm_opt.pack(fill="x", **pad)
-        ttk.Label(frm_opt, text=tr("Порядок номеров:", "Numbering order:")).grid(
-            row=0, column=0, sticky="w", padx=6, pady=4)
-        self.cmb_order = KeyedCombo(frm_opt, ORDER_KEYS, order_label,
-                                    self.order_key)
-        self.cmb_order.widget.grid(row=0, column=1, sticky="w", padx=6, pady=4)
-        ttk.Label(frm_opt, text=tr("авто: по номеру в названии, если он есть",
-                                   "auto: by the number in the title, if any"),
-                  **grey).grid(row=0, column=2, sticky="w")
-        ttk.Label(frm_opt, text=tr("Скачивать одновременно:",
-                                   "Parallel downloads:")).grid(
-            row=1, column=0, sticky="w", padx=6, pady=4)
-        ttk.Spinbox(frm_opt, from_=1, to=MAX_THREADS, width=4, state="readonly",
-                    textvariable=self.var_threads).grid(
-            row=1, column=1, sticky="w", padx=6, pady=4)
-        ttk.Label(frm_opt, text=tr("потоков (3 — оптимально)",
-                                   "threads (3 is optimal)"),
-                  **grey).grid(row=1, column=2, sticky="w")
-        ttk.Checkbutton(
-            frm_opt, variable=self.var_retry,
-            text=tr("Повторить то, что не скачалось с первого раза",
-                    "Retry anything that failed the first time")
-        ).grid(row=2, column=0, columnspan=3, sticky="w", padx=6, pady=2)
-        ttk.Checkbutton(
-            frm_opt, variable=self.var_sort,
-            text=tr("Если в одной папке несколько глав — разнести по "
-                    "Chapter 01, 02 …",
-                    "If one folder has several chapters, split into "
-                    "Chapter 01, 02 …")
-        ).grid(row=3, column=0, columnspan=3, sticky="w", padx=6, pady=(2, 6))
-
-        # Buttons
-        frm_btn = ttk.Frame(self.root)
-        frm_btn.pack(fill="x", **pad)
-        self.btn_start = ttk.Button(frm_btn, text=tr("⬇  Скачать", "⬇  Download"),
-                                    style="Big.TButton", command=self.start)
-        self.btn_start.pack(side="left")
-        self.btn_stop = ttk.Button(frm_btn, text=tr("■  Стоп", "■  Stop"),
-                                   command=self.stop, state="disabled")
-        self.btn_stop.pack(side="left", padx=8)
-        ttk.Button(frm_btn, text=tr("Упорядочить файлы", "Organize files"),
-                   command=self.organize_now).pack(side="left")
-        ttk.Button(frm_btn, text=tr("Открыть папку", "Open folder"),
-                   command=self.open_folder).pack(side="right")
-
-        # Status
-        frm_status = ttk.Frame(self.root)
-        frm_status.pack(fill="x", **pad)
-        self.progress = ttk.Progressbar(frm_status, mode="indeterminate")
-        self.progress.pack(fill="x")
-        row = ttk.Frame(frm_status)
-        row.pack(fill="x", pady=(4, 0))
-        ttk.Label(row, textvariable=self.var_status).pack(side="left")
-        ttk.Label(row, textvariable=self.var_stats,
-                  font=("TkDefaultFont", 10, "bold")).pack(side="right")
+        status = ctk.CTkFrame(tab, fg_color="transparent")
+        status.pack(fill="x", pady=(8, 6))
+        ctk.CTkLabel(status, textvariable=self.var_status,
+                     font=self.font(13, "bold")).pack(side="left")
+        ctk.CTkLabel(status, textvariable=self.var_stats, font=self.font(12),
+                     text_color=MUTED).pack(side="left", padx=(12, 0))
+        small = {"height": 28, "fg_color": "transparent", "border_width": 1,
+                 "border_color": ("#d1d5db", "#3a3d42"),
+                 "text_color": ("#111827", "#f3f4f6"),
+                 "hover_color": ("#e5e7eb", "#2a2c30"),
+                 "font": self.font(12)}
+        ctk.CTkButton(status, text=tr("Открыть папку", "Open folder"),
+                      width=120, command=self.open_folder, **small).pack(
+            side="right")
+        ctk.CTkButton(status, text=tr("Упорядочить файлы", "Organize files"),
+                      width=140, command=self.organize_now, **small).pack(
+            side="right", padx=(0, 8))
 
         # Log
-        frm_log = ttk.LabelFrame(self.root, text=tr(" Журнал ", " Log "))
-        frm_log.pack(fill="both", expand=True, **pad)
-        self.txt_log = tk.Text(frm_log, height=8, wrap="none", state="disabled",
-                               font=(MONO_FONT, 9), background="#1e1e1e",
-                               foreground="#d4d4d4")
-        scroll = ttk.Scrollbar(frm_log, command=self.txt_log.yview)
-        self.txt_log.configure(yscrollcommand=scroll.set)
-        scroll.pack(side="right", fill="y")
-        self.txt_log.pack(fill="both", expand=True, padx=(6, 0), pady=6)
-        self.txt_log.tag_configure("err", foreground="#f48771")
-        self.txt_log.tag_configure("ok", foreground="#89d185")
-        self.txt_log.tag_configure("skip", foreground="#808080")
-        self.txt_log.tag_configure("info", foreground="#75beff")
+        self.txt_log = ctk.CTkTextbox(tab, height=150, wrap="none",
+                                      font=self.font(12, mono=True),
+                                      fg_color=CARD, corner_radius=12,
+                                      state="disabled")
+        self.txt_log.pack(fill="both", expand=True)
+        for tag, color in LOG_COLORS.items():
+            self.txt_log.tag_config(tag, foreground=color)
+
+    def build_settings_tab(self, tab):
+        scroll = ctk.CTkScrollableFrame(tab, fg_color=WINDOW_BG)
+        scroll.pack(fill="both", expand=True)
+
+        # DeviantArt
+        da = self.card(scroll)
+        self.heading(da, "DeviantArt", None)
+        ctk.CTkLabel(da, textvariable=self.var_connected, font=self.font(12),
+                     text_color=MUTED, anchor="w", justify="left",
+                     wraplength=760).pack(fill="x", padx=16, pady=(2, 8))
+        self.btn_connect = ctk.CTkButton(
+            da, text=tr("Подключить DeviantArt", "Connect DeviantArt"),
+            height=36, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            command=self.connect_deviantart)
+        self.btn_connect.pack(anchor="w", padx=16, pady=(0, 10))
+        ctk.CTkLabel(da, text=tr("Другие способы входа (необязательно)",
+                                 "Other ways to sign in (optional)"),
+                     font=self.font(12, "bold"), anchor="w").pack(
+            fill="x", padx=16, pady=(4, 4))
+        grid = ctk.CTkFrame(da, fg_color="transparent")
+        grid.pack(fill="x", padx=16, pady=(0, 14))
+        grid.columnconfigure((0, 1), weight=1)
+        for col, text in ((0, tr("Логин", "Username")),
+                          (1, tr("Пароль (не сохраняется)",
+                                 "Password (not stored)"))):
+            ctk.CTkLabel(grid, text=text, font=self.font(12), text_color=MUTED,
+                         anchor="w").grid(row=0, column=col, sticky="w")
+        ctk.CTkEntry(grid, textvariable=self.var_user, height=34).grid(
+            row=1, column=0, sticky="ew", padx=(0, 8))
+        ctk.CTkEntry(grid, textvariable=self.var_pass, height=34, show="•").grid(
+            row=1, column=1, sticky="ew")
+        browser_row = ctk.CTkFrame(da, fg_color="transparent")
+        browser_row.pack(fill="x", padx=16, pady=(0, 16))
+        ctk.CTkLabel(browser_row, text=tr("Вход из браузера:",
+                                          "Cookies from browser:"),
+                     font=self.font(13)).pack(side="left")
+        self.cmb_browser = KeyedOption(browser_row, BROWSER_KEYS, browser_label,
+                                       self.browser_key)
+        self.cmb_browser.widget.pack(side="left", padx=(10, 0))
+
+        # Order and folders
+        order = self.card(scroll)
+        self.heading(order, tr("Порядок файлов", "File order"), tr(
+            "Автоматически: по номеру в названии (Part 2 раньше Part 10), если он "
+            "есть у работ, иначе по дате.",
+            "Automatic: by the number in the title (Part 2 before Part 10) when "
+            "works have one, otherwise by date."))
+        self.cmb_order = KeyedOption(order, ORDER_KEYS, order_label,
+                                     self.order_key)
+        self.cmb_order.widget.pack(anchor="w", padx=16, pady=(8, 8))
+        ctk.CTkSwitch(order, variable=self.var_sort, progress_color=ACCENT,
+                      text=tr("Если в одной папке несколько глав — разнести по "
+                              "Chapter 01, 02 …",
+                              "If one folder has several chapters, split into "
+                              "Chapter 01, 02 …")).pack(
+            anchor="w", padx=16, pady=(0, 16))
+
+        # Downloading
+        dl = self.card(scroll)
+        self.heading(dl, tr("Скачивание", "Downloading"))
+        row = ctk.CTkFrame(dl, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(8, 8))
+        ctk.CTkLabel(row, text=tr("Одновременно:", "At the same time:"),
+                     font=self.font(13)).pack(side="left")
+        ctk.CTkSegmentedButton(row, values=[str(i) for i in range(1, MAX_THREADS + 1)],
+                               variable=self.var_threads,
+                               selected_color=ACCENT,
+                               selected_hover_color=ACCENT_HOVER).pack(
+            side="left", padx=(10, 8))
+        ctk.CTkLabel(row, text=tr("3 — оптимально", "3 is optimal"),
+                     font=self.font(12), text_color=MUTED).pack(side="left")
+        ctk.CTkSwitch(dl, variable=self.var_retry, progress_color=ACCENT,
+                      text=tr("Повторять то, что не скачалось с первого раза",
+                              "Retry anything that failed the first time")).pack(
+            anchor="w", padx=16, pady=(0, 16))
+
+        # Appearance
+        look = self.card(scroll)
+        self.heading(look, tr("Внешний вид", "Appearance"))
+        row = ctk.CTkFrame(look, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(8, 8))
+        ctk.CTkLabel(row, text=tr("Язык:", "Language:"), width=90, anchor="w",
+                     font=self.font(13)).pack(side="left")
+        self.cmb_lang = KeyedSegments(row, list(LANGUAGES), LANGUAGES.get,
+                                      get_lang(), command=self.change_language)
+        self.cmb_lang.widget.pack(side="left")
+        row = ctk.CTkFrame(look, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(0, 16))
+        ctk.CTkLabel(row, text=tr("Тема:", "Theme:"), width=90, anchor="w",
+                     font=self.font(13)).pack(side="left")
+        self.seg_theme = KeyedSegments(row, THEME_KEYS, theme_label,
+                                       self.theme_key, command=self.change_theme)
+        self.seg_theme.widget.pack(side="left")
+
+    def update_dest(self):
+        if hasattr(self, "var_dest"):
+            self.var_dest.set(tr("Сохранится в: ", "Will be saved to: ")
+                              + str(self.dest_folder()))
 
     def refresh_texts(self):
         """Texts that live in variables (status, counters, sign-in hint)."""
@@ -941,8 +1071,13 @@ class App:
         if not self.running:
             self.var_status.set(tr("Готово к работе", "Ready"))
 
-    def change_language(self, _event=None):
-        new = self.cmb_lang.get()
+    def change_theme(self, key):
+        self.theme_key = key
+        ctk.set_appearance_mode(key)
+        self.save_config()
+
+    def change_language(self, new=None):
+        new = new or self.cmb_lang.get()
         if new == get_lang():
             return
         if self.running:
@@ -950,16 +1085,17 @@ class App:
                 "Язык можно сменить, когда скачивание закончится.",
                 "You can change the language after the download finishes."))
             self.cmb_lang.key = get_lang()
-            self.cmb_lang.var.set(LANGUAGES[get_lang()])
+            self.cmb_lang.widget.set(LANGUAGES[get_lang()])
             return
         self.browser_key = self.cmb_browser.get()
         self.order_key = self.cmb_order.get()
         links = self.txt_links.get("1.0", "end-1c")
-        log_dump = self.txt_log.dump("1.0", "end-1c", text=True, tag=True)
+        log_dump = self.txt_log._textbox.dump("1.0", "end-1c", text=True, tag=True)
         set_lang(new)
         for w in self.root.winfo_children():
             w.destroy()
         self.build_ui()
+        self.tabs.set(self.tab_settings_name)
         self.txt_links.insert("1.0", links)
         self.restore_log(log_dump)
         self.refresh_texts()
@@ -993,6 +1129,7 @@ class App:
             CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
             CONFIG_PATH.write_text(json.dumps({
                 "lang": get_lang(),
+                "theme": self.theme_key,
                 "base": self.var_base.get(),
                 "browser": self.cmb_browser.get(),
                 "username": self.var_user.get().strip(),
@@ -1011,15 +1148,22 @@ class App:
     def update_connected(self):
         if self.da_connected:
             self.var_connected.set(tr(
-                "✔ DeviantArt подключён — работы 18+ скачиваются в полном "
-                "качестве.",
-                "✔ DeviantArt connected — 18+ works download in full quality."))
+                "✔ Подключено — работы 18+ скачиваются в полном качестве.",
+                "✔ Connected — 18+ works download in full quality."))
+            chip = {"text": "● DeviantArt", "fg_color": ("#dcfce7", "#14532d"),
+                    "hover_color": ("#bbf7d0", "#166534"),
+                    "text_color": ("#166534", "#bbf7d0")}
         else:
             self.var_connected.set(tr(
-                "Для 18+ один раз нажми «Подключить DeviantArt». Пароль не "
-                "сохраняется.",
-                "For 18+ works click “Connect DeviantArt” once. No password "
-                "is stored."))
+                "Нужно один раз для работ 18+: откроется DeviantArt, нажми "
+                "«Authorize». Пароль программа не хранит.",
+                "Needed once for 18+ works: DeviantArt opens, click "
+                "“Authorize”. The app never stores your password."))
+            chip = {"text": tr("Подключить DeviantArt", "Connect DeviantArt"),
+                    "fg_color": ACCENT, "hover_color": ACCENT_HOVER,
+                    "text_color": "#ffffff"}
+        if getattr(self, "btn_da_status", None) is not None:
+            self.btn_da_status.configure(**chip)
 
     def threads(self):
         try:
@@ -1074,20 +1218,34 @@ class App:
     def update_stats(self):
         s = self.stats
         self.var_stats.set(tr(
-            f"Скачано: {s['done']}   Пропущено: {s['skip']}   Ошибок: {s['err']}",
-            f"Downloaded: {s['done']}   Skipped: {s['skip']}   Errors: {s['err']}"))
+            f"скачано {s['done']} · пропущено {s['skip']} · ошибок {s['err']}",
+            f"{s['done']} downloaded · {s['skip']} skipped · {s['err']} errors"))
 
     def set_running(self, running):
         self.running = running
-        state = "disabled" if running else "normal"
-        self.btn_connect.configure(state=state)
-        self.btn_start.configure(state=state)
-        self.btn_stop.configure(state="normal" if running else "disabled")
-        self.cmb_lang.widget.configure(state="disabled" if running else "readonly")
         if running:
-            self.progress.start(12)
+            self.btn_start.configure(text="■  " + tr("Стоп", "Stop"),
+                                     fg_color=DANGER, hover_color=DANGER_HOVER)
+            self.progress.configure(mode="indeterminate", progress_color=ACCENT)
+            self.progress.start()
         else:
+            self.btn_start.configure(text="⬇  " + tr("Скачать", "Download"),
+                                     fg_color=ACCENT, hover_color=ACCENT_HOVER)
             self.progress.stop()
+            self.progress.configure(mode="determinate",
+                                    progress_color=("#e5e7eb", "#2a2c30"))
+            self.progress.set(0)
+        state = "disabled" if running else "normal"
+        for widget in (self.btn_connect, self.btn_da_status,
+                       self.cmb_lang.widget if self.cmb_lang else None):
+            if widget is not None:
+                widget.configure(state=state)
+
+    def toggle_start(self):
+        if self.running:
+            self.stop()
+        else:
+            self.start()
 
     # ---------- buttons ----------
 
@@ -1570,7 +1728,8 @@ def main():
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
         except Exception:
             pass
-    root = tk.Tk(className="art-downloader")   # matches the menu icon
+    ctk.set_default_color_theme("green")
+    root = ctk.CTk(className="art-downloader")   # matches the menu icon
     App(root)
     root.mainloop()
 

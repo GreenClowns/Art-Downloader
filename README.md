@@ -6,7 +6,10 @@
 
 A simple desktop app for **Windows and Linux** for downloading art and comics from **DeviantArt** (and other sites supported by [gallery-dl](https://github.com/mikf/gallery-dl)) — whole folders at once, in reading order, with no mixed-up files.
 
-![App window](docs/screenshot.png)
+<p align="center">
+  <img src="docs/screenshot.png" alt="Light theme" width="49%">
+  <img src="docs/screenshot-dark.png" alt="Dark theme" width="49%">
+</p>
 
 ## Features
 
@@ -17,7 +20,8 @@ A simple desktop app for **Windows and Linux** for downloading art and comics fr
 - **Fast**: parallel downloads.
 - **Reliable**: retries failed files automatically, resumes after Stop, never downloads the same file twice.
 - **Chapters**: if one folder mixes several chapters, it can split them into `Chapter 01`, `Chapter 02`, …
-- **Two languages**: English and Russian, switch with 🌐 in the top-right corner. Defaults to your system language.
+- **Clean, modern look**: light and dark themes (follows your system by default), one big Download/Stop button, everything else tucked away in **Settings**.
+- **Two languages**: English and Russian (Settings → Appearance). Defaults to your system language.
 
 Example result:
 
@@ -54,7 +58,7 @@ Tested on Fedora; Ubuntu/Debian work too.
    ```bash
    bash install.sh
    ```
-   The installer sets up everything it needs (`python3-tkinter`, `gallery-dl`) and may ask for your computer password.
+   The installer sets up everything it needs: `python3-tkinter` from your system (may ask for your computer password) and the app's own Python environment with its libraries (needs internet).
 3. Done: “Art Downloader” appears in your applications menu (press Super and start typing “Art”).
 
 Or with git:
@@ -69,7 +73,7 @@ bash install.sh
 
 1. Paste links, one per line.
 2. Enter a “Project name” — that's the folder everything is saved to.
-3. For 18+ works, click **🔑 Connect DeviantArt** once: DeviantArt opens in your browser, click **Authorize**.
+3. For 18+ works, click **Connect DeviantArt** (top-right) once: DeviantArt opens in your browser, click **Authorize**.
 4. Click **⬇ Download**.
 
 If a download gets interrupted, just click “Download” again: the app fetches only what's missing, and file numbers stay the same.
@@ -80,7 +84,7 @@ If a download gets interrupted, just click “Download” again: the app fetches
 Click “Connect DeviantArt” and download again. Without it, DeviantArt only gives apps a blurred version.
 
 **Files are numbered out of order.**
-The artist probably posted the parts out of order and the folder was numbered by publication date. Choose **Numbering order → automatic** (or **by title**) and click **Organize files**: everything already downloaded is renumbered, nothing is downloaded again.
+The artist probably posted the parts out of order and the folder was numbered by publication date. In **Settings → File order** choose **automatic** (or **by title**), then click **Organize files**: everything already downloaded is renumbered, nothing is downloaded again.
 
 **Some works still didn't download.**
 Usually that's paid content (subscriptions, Premium Gallery). You can only download it if you have access to it on the site. The app lists these files at the end of the log.
@@ -102,9 +106,11 @@ Your downloaded images are not deleted.
 
 ## For developers
 
-The whole app is a single file, [`art_downloader.py`](art_downloader.py) (Python + Tkinter); downloading is done by [gallery-dl](https://github.com/mikf/gallery-dl). Logic tests (no internet needed):
+The whole app is a single file, [`art_downloader.py`](art_downloader.py) (Python + [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter)); downloading is done by [gallery-dl](https://github.com/mikf/gallery-dl). Run from source and test the logic (no internet needed):
 
 ```bash
+pip install -r requirements.txt
+python3 art_downloader.py
 python3 -m pytest
 ```
 

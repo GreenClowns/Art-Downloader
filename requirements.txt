@@ -1,4 +1,8 @@
 # Exact versions, checked with pip-audit. Dependabot proposes updates.
+customtkinter==6.0.0
+darkdetect==0.8.0
+packaging==26.3
+pillow==13.0.0
 gallery-dl==1.32.18
 requests==2.34.2
 urllib3==2.8.0
