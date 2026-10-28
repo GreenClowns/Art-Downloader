@@ -7,7 +7,6 @@
 A simple desktop app for **Windows and Linux** for downloading art and comics from **DeviantArt** (and other sites supported by [gallery-dl](https://github.com/mikf/gallery-dl)) — whole folders at once, in reading order, with no mixed-up files.
 
 <p align="center">
-  <img src="docs/screenshot.png" alt="Light theme" width="49%">
   <img src="docs/screenshot-dark.png" alt="Dark theme" width="49%">
 </p>
 
