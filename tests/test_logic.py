@@ -24,7 +24,22 @@ def test_detect_lang():
     assert a.detect_lang({"LANG": "uk_UA.UTF-8"}) == "ru"
     assert a.detect_lang({"LANG": "sv_SE.UTF-8"}) == "en"
     assert a.detect_lang({"LANGUAGE": "en_US", "LANG": "ru_RU.UTF-8"}) == "en"
-    assert a.detect_lang({}) == "en"
+    assert a.detect_lang({}, windows_lang_id=0) == "en"
+    # Windows UI language ids: 0x0419 ru-RU, 0x0422 uk-UA, 0x0409 en-US
+    assert a.detect_lang({}, windows_lang_id=0x0419) == "ru"
+    assert a.detect_lang({}, windows_lang_id=0x0422) == "ru"
+    assert a.detect_lang({}, windows_lang_id=0x0409) == "en"
+
+
+def test_safe_name_windows_characters():
+    assert a.safe_name('Chapter 1: "Start"?', windows=True) == "Chapter 1- -Start--"
+    assert a.safe_name("Chapter 1: Start", windows=False) == "Chapter 1: Start"
+    assert a.safe_name("name. ", windows=True) == "name"
+
+
+def test_find_gallery_dl_in_exe(monkeypatch):
+    monkeypatch.setattr(a, "FROZEN", True)
+    assert a.find_gallery_dl() == [sys.executable, a.GALLERY_DL_FLAG]
 
 
 def test_tr_and_labels():
@@ -160,6 +175,8 @@ def test_run_config_has_no_password_without_login():
     try:
         data = json.loads(Path(path).read_text())
         assert "password" not in data["extractor"]["deviantart"]
-        assert oct(os.stat(path).st_mode)[-3:] == "600"
+        assert data["output"]["stdout"] == "utf-8"
+        if not a.WINDOWS:   # Windows has no Unix permission bits
+            assert oct(os.stat(path).st_mode)[-3:] == "600"
     finally:
         os.remove(path)

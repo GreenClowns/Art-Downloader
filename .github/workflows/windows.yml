@@ -1,0 +1,94 @@
+name: windows
+
+# Builds the Windows app. Every push to main produces a test build
+# (Actions → windows → Artifacts). Pushing a tag like v1.2.3 also
+# publishes a GitHub Release with the installer and the portable ZIP.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: python -m pip install --upgrade pip pyinstaller gallery-dl pytest
+
+      - name: Tests
+        run: python -m pytest -q
+
+      - name: Version
+        id: version
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $v = "${{ github.ref_name }}".TrimStart("v")
+          } else {
+            $v = "0.0.0"
+          }
+          "value=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Build exe (PyInstaller)
+        run: >
+          pyinstaller --noconfirm --clean --windowed
+          --name ArtDownloader
+          --icon assets/icon.ico
+          --add-data "assets/icon.png;assets"
+          --collect-submodules gallery_dl
+          art_downloader.py
+
+      - name: Smoke test built-in gallery-dl
+        run: |
+          $code = @'
+          import subprocess, sys
+          exe = r"dist\ArtDownloader\ArtDownloader.exe"
+          out = subprocess.run([exe, "--gallery-dl", "--version"],
+                               capture_output=True, text=True, timeout=120)
+          print("version:", repr(out.stdout.strip()), "rc:", out.returncode)
+          assert out.returncode == 0 and out.stdout.strip(), out.stderr
+          ext = subprocess.run([exe, "--gallery-dl", "--list-extractors", "deviantart"],
+                               capture_output=True, text=True, timeout=120)
+          assert "deviantart" in ext.stdout.lower(), ext.stdout + ext.stderr
+          print("deviantart extractor: ok")
+          '@
+          python -c $code
+
+      - name: Portable ZIP
+        run: |
+          $v = "${{ steps.version.outputs.value }}"
+          Compress-Archive -Path dist\ArtDownloader -DestinationPath "dist\ArtDownloader-$v-portable.zip"
+
+      - name: Installer (Inno Setup)
+        run: |
+          choco install innosetup -y --no-progress
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ steps.version.outputs.value }}" windows\installer.iss
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ArtDownloader-windows
+          path: |
+            dist/*-Setup.exe
+            dist/*-portable.zip
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*-Setup.exe
+            dist/*-portable.zip
+          generate_release_notes: true

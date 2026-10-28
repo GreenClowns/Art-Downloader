@@ -10,18 +10,22 @@ Features:
     (by publication date, gallery order or title);
   * DeviantArt sign-in (OAuth button, login/password or browser cookies);
   * parallel downloads, automatic retry, resume after stop;
-  * interface in English and Russian.
+  * interface in English and Russian;
+  * runs on Linux and Windows.
 
 Run:       python3 art_downloader.py
 Requires:  gallery-dl and Tkinter (Fedora: sudo dnf install python3-tkinter)
+           The Windows .exe has everything built in.
 """
 
+import importlib.util
 import json
 import os
 import queue
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import tkinter as tk
@@ -29,9 +33,22 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 APP_TITLE = "Art Downloader"
-CONFIG_PATH = Path.home() / ".config" / "art_downloader.json"
+WINDOWS = os.name == "nt"
+FROZEN = getattr(sys, "frozen", False)      # running as a PyInstaller .exe
+GALLERY_DL_FLAG = "--gallery-dl"            # exe runs its built-in gallery-dl
+
+if WINDOWS:
+    CONFIG_PATH = (Path(os.environ.get("APPDATA") or Path.home())
+                   / "ArtDownloader" / "settings.json")
+else:
+    CONFIG_PATH = Path.home() / ".config" / "art_downloader.json"
 DEFAULT_BASE = Path.home() / "ArtDownloads"
 MAX_THREADS = 5
+MONO_FONT = "Consolas" if WINDOWS else "monospace"
+# Tk on Windows can't always draw emoji outside the basic plane
+GLOBE = "" if WINDOWS else "🌐"
+KEY = "" if WINDOWS else "🔑 "
+CREATE_NO_WINDOW = 0x08000000               # hide console windows on Windows
 
 BROWSER_KEYS = ["firefox", "chrome", "chromium", "none"]
 ORDER_KEYS = ["date", "gallery", "name"]
@@ -62,13 +79,24 @@ LANGUAGES = {"en": "English", "ru": "Русский"}
 _lang = "en"
 
 
-def detect_lang(env=None):
+RU_LANG_IDS = {0x19, 0x22, 0x23, 0x3F}       # Windows: ru, uk, be, kk
+
+
+def detect_lang(env=None, windows_lang_id=None):
     """Interface language from the system locale: Russian for ru/uk/be/kk."""
     env = os.environ if env is None else env
     for var in ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"):
         value = (env.get(var) or "").lower()
         if value:
             return "ru" if value[:2] in ("ru", "uk", "be", "kk") else "en"
+    if windows_lang_id is None and WINDOWS:
+        try:
+            import ctypes
+            windows_lang_id = ctypes.windll.kernel32.GetUserDefaultUILanguage()
+        except Exception:
+            windows_lang_id = 0
+    if windows_lang_id:
+        return "ru" if (windows_lang_id & 0x3FF) in RU_LANG_IDS else "en"
     return "en"
 
 
@@ -119,12 +147,66 @@ def migrate_config(cfg):
 # --------------------------------------------------------------------------
 
 def find_gallery_dl():
-    """Path to gallery-dl: from PATH or ~/.local/bin (pipx install)."""
+    """
+    Command that runs gallery-dl, as a list (or None if it isn't found):
+    the .exe's built-in copy, gallery-dl from PATH, ~/.local/bin (pipx),
+    or the Python module.
+    """
+    if FROZEN:
+        return [sys.executable, GALLERY_DL_FLAG]
     found = shutil.which("gallery-dl")
     if found:
-        return found
+        return [found]
     local = Path.home() / ".local" / "bin" / "gallery-dl"
-    return str(local) if local.exists() else None
+    if local.exists():
+        return [str(local)]
+    if importlib.util.find_spec("gallery_dl"):
+        return [sys.executable, "-m", "gallery_dl"]
+    return None
+
+
+def resource_path(name):
+    """A file shipped with the app (next to the script or inside the exe)."""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    for candidate in (base / name, base / "assets" / name):
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def run_builtin_gallery_dl(args):
+    """
+    Entry point for `ArtDownloader.exe --gallery-dl …`: the windowed .exe
+    has no console, so attach the pipes the parent gave us, then hand over
+    to gallery-dl.
+    """
+    if WINDOWS:
+        import ctypes
+        import io
+        import msvcrt
+        kernel32 = ctypes.windll.kernel32
+        for name, handle_id in (("stdout", -11), ("stderr", -12)):
+            if getattr(sys, name) is not None:
+                continue
+            stream = None
+            handle = kernel32.GetStdHandle(handle_id)
+            if handle not in (0, -1, None):
+                try:
+                    fd = msvcrt.open_osfhandle(handle, os.O_WRONLY)
+                    stream = io.TextIOWrapper(
+                        io.FileIO(fd, "w", closefd=False),
+                        encoding="utf-8", errors="replace", line_buffering=True)
+                except OSError:
+                    stream = None
+            setattr(sys, name, stream or open(os.devnull, "w"))
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+    from gallery_dl import main as gallery_dl_main
+    sys.argv = ["gallery-dl"] + list(args)
+    sys.exit(gallery_dl_main())
 
 
 def is_deviantart(url):
@@ -166,9 +248,10 @@ def parse_urls(text):
     return result
 
 
-def safe_name(name):
-    """Folder name without forbidden characters."""
-    name = re.sub(r'[/\\\x00-\x1f]', "-", name or "").strip(" .")
+def safe_name(name, windows=WINDOWS):
+    """Folder name without characters the file system forbids."""
+    bad = r'[<>:"/\\|?*\x00-\x1f]' if windows else r'[/\\\x00-\x1f]'
+    name = re.sub(bad, "-", name or "").strip(" .")
     return name[:120] or tr("Без названия", "Untitled")
 
 
@@ -365,7 +448,11 @@ def make_run_config(username=None, password=None):
         da.update(username=username, password=password)
     fd, path = tempfile.mkstemp(prefix="artdl-", suffix=".json")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump({"extractor": {"deviantart": da}}, f)
+        json.dump({
+            "extractor": {"deviantart": da},
+            # UTF-8 output so non-Latin titles survive on Windows too
+            "output": {"stdout": "utf-8", "stderr": "utf-8"},
+        }, f)
     os.chmod(path, 0o600)
     return path
 
@@ -411,8 +498,10 @@ class App:
     def __init__(self, root):
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("860x830")
-        self.root.minsize(680, 640)
+        scale = max(1.0, root.winfo_fpixels("1i") / 96) if WINDOWS else 1.0
+        self.root.geometry(f"{int(860 * scale)}x{int(830 * scale)}")
+        self.root.minsize(int(680 * scale), int(640 * scale))
+        self.set_window_icon()
 
         self.procs = []
         self.procs_lock = threading.Lock()
@@ -448,13 +537,25 @@ class App:
 
     # ---------- interface ----------
 
+    def set_window_icon(self):
+        icon = resource_path("icon.png")
+        if not icon:
+            return
+        try:
+            self._icon = tk.PhotoImage(file=str(icon))
+            self.root.iconphoto(True, self._icon)
+        except tk.TclError:
+            pass
+
     def build_ui(self):
         pad = {"padx": 10, "pady": 4}
         style = ttk.Style()
-        try:
-            style.theme_use("clam")
-        except tk.TclError:
-            pass
+        for theme in (("vista", "clam") if WINDOWS else ("clam",)):
+            try:
+                style.theme_use(theme)
+                break
+            except tk.TclError:
+                continue
         style.configure("Big.TButton", font=("TkDefaultFont", 11, "bold"),
                         padding=(14, 6))
         grey = {"foreground": "#666"}
@@ -467,7 +568,8 @@ class App:
         self.cmb_lang.widget.pack(side="right")
         self.cmb_lang.widget.bind("<<ComboboxSelected>>", self.change_language,
                                   add="+")
-        ttk.Label(frm_top, text="🌐").pack(side="right", padx=(0, 4))
+        ttk.Label(frm_top, text=GLOBE or "Language / Язык:").pack(
+            side="right", padx=(0, 4))
 
         # Links
         frm_links = ttk.LabelFrame(
@@ -475,7 +577,7 @@ class App:
                                " Links (one per line) "))
         frm_links.pack(fill="x", **pad)
         self.txt_links = tk.Text(frm_links, height=6, wrap="none",
-                                 font=("monospace", 10), undo=True)
+                                 font=(MONO_FONT, 10), undo=True)
         self.txt_links.pack(fill="x", padx=6, pady=6)
         ttk.Label(frm_links, text=tr(
             "Папка, глава, вся серия, галерея, профиль или отдельная работа. "
@@ -522,7 +624,7 @@ class App:
                                       self.browser_key)
         self.cmb_browser.widget.grid(row=1, column=1, sticky="w", padx=6, pady=4)
         self.btn_connect = ttk.Button(
-            frm_auth, text=tr("🔑 Подключить DeviantArt", "🔑 Connect DeviantArt"),
+            frm_auth, text=KEY + tr("Подключить DeviantArt", "Connect DeviantArt"),
             command=self.connect_deviantart)
         self.btn_connect.grid(row=1, column=2, columnspan=2, sticky="e",
                               padx=6, pady=4)
@@ -591,7 +693,7 @@ class App:
         frm_log = ttk.LabelFrame(self.root, text=tr(" Журнал ", " Log "))
         frm_log.pack(fill="both", expand=True, **pad)
         self.txt_log = tk.Text(frm_log, height=8, wrap="none", state="disabled",
-                               font=("monospace", 9), background="#1e1e1e",
+                               font=(MONO_FONT, 9), background="#1e1e1e",
                                foreground="#d4d4d4")
         scroll = ttk.Scrollbar(frm_log, command=self.txt_log.yview)
         self.txt_log.configure(yscrollcommand=scroll.set)
@@ -695,15 +797,22 @@ class App:
         except (tk.TclError, ValueError):
             return 3
 
+    def install_hint(self):
+        cmd = "pip install gallery-dl" if WINDOWS else "pipx install gallery-dl"
+        return tr(f"Установи его: {cmd}", f"Install it: {cmd}")
+
     def check_gallery_dl(self):
         self.gdl = find_gallery_dl()
-        if self.gdl:
-            self.log(tr(f"gallery-dl найден: {self.gdl}",
-                        f"gallery-dl found: {self.gdl}"), "info")
+        if FROZEN:
+            self.log(tr("gallery-dl встроен в программу",
+                        "gallery-dl is built into the app"), "info")
+        elif self.gdl:
+            where = " ".join(self.gdl)
+            self.log(tr(f"gallery-dl найден: {where}",
+                        f"gallery-dl found: {where}"), "info")
         else:
-            self.log(tr("gallery-dl не найден! Установи: pipx install gallery-dl",
-                        "gallery-dl not found! Install it: pipx install gallery-dl"),
-                     "err")
+            self.log(tr("gallery-dl не найден! ", "gallery-dl not found! ")
+                     + self.install_hint(), "err")
 
     def dest_folder(self):
         base = Path(os.path.expanduser(self.var_base.get().strip()
@@ -719,7 +828,12 @@ class App:
     def open_folder(self):
         folder = self.dest_folder()
         folder.mkdir(parents=True, exist_ok=True)
-        subprocess.Popen(["xdg-open", str(folder)])
+        if WINDOWS:
+            os.startfile(str(folder))
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(folder)])
+        else:
+            subprocess.Popen(["xdg-open", str(folder)])
 
     def log(self, text, tag=None):
         self.txt_log.configure(state="normal")
@@ -749,9 +863,9 @@ class App:
 
     def start(self):
         if not self.gdl:
-            messagebox.showerror(APP_TITLE, tr(
-                "gallery-dl не найден.\nУстанови его: pipx install gallery-dl",
-                "gallery-dl not found.\nInstall it: pipx install gallery-dl"))
+            messagebox.showerror(APP_TITLE, tr("gallery-dl не найден.\n",
+                                               "gallery-dl not found.\n")
+                                 + self.install_hint())
             return
         urls = parse_urls(self.txt_links.get("1.0", "end"))
         if not urls:
@@ -880,11 +994,13 @@ class App:
 
     def run_process(self, args, on_line):
         """Runs gallery-dl and passes its output to on_line line by line."""
-        env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
+        env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8",
+                   PYTHONUTF8="1")
         proc = subprocess.Popen(
-            [self.gdl] + args, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-            errors="replace", env=env, bufsize=1)
+            list(self.gdl) + args, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, text=True,
+            encoding="utf-8", errors="replace", env=env, bufsize=1,
+            creationflags=CREATE_NO_WINDOW if WINDOWS else 0)
         with self.procs_lock:
             self.procs.append(proc)
         if self.stop_flag.is_set():
@@ -1187,6 +1303,15 @@ class App:
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == GALLERY_DL_FLAG:
+        run_builtin_gallery_dl(sys.argv[2:])
+        return
+    if WINDOWS:
+        try:  # sharp text on high-DPI screens
+            import ctypes
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            pass
     root = tk.Tk(className="art-downloader")   # matches the menu icon
     App(root)
     root.mainloop()

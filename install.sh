@@ -11,8 +11,9 @@ SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$HOME/.local/share/art-downloader"
 DESKTOP_DIR="$HOME/.local/share/applications"
 DESKTOP="$DESKTOP_DIR/art-downloader.desktop"
-ICON_DIR="$HOME/.local/share/icons/hicolor/scalable/apps"
-ICON="$ICON_DIR/art-downloader.svg"
+ICON_DIR="$HOME/.local/share/icons/hicolor/256x256/apps"
+ICON="$ICON_DIR/art-downloader.png"
+OLD_ICON="$HOME/.local/share/icons/hicolor/scalable/apps/art-downloader.svg"
 
 # Messages in Russian for ru/uk/be/kk locales, English otherwise
 LOCALE="${LANGUAGE:-${LC_ALL:-${LC_MESSAGES:-${LANG:-en}}}}"
@@ -21,7 +22,7 @@ t() { if [[ -n "$RU" ]]; then echo "$1"; else echo "$2"; fi; }
 
 remove_app() {
     rm -rf "$APP_DIR"
-    rm -f "$DESKTOP" "$ICON"
+    rm -f "$DESKTOP" "$ICON" "$OLD_ICON"
     update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
 }
 
@@ -33,7 +34,7 @@ case "$1" in
         exit 0 ;;
 esac
 
-if [[ ! -f "$SRC_DIR/art_downloader.py" || ! -f "$SRC_DIR/assets/icon.svg" ]]; then
+if [[ ! -f "$SRC_DIR/art_downloader.py" || ! -f "$SRC_DIR/assets/icon.png" ]]; then
     t "✘ Не нашёл файлы программы рядом с install.sh." \
       "✘ Program files not found next to install.sh."
     t "  Запускай install.sh из распакованной папки проекта." \
@@ -90,7 +91,9 @@ fi
 # 3. App, icon, menu entry
 mkdir -p "$APP_DIR" "$DESKTOP_DIR" "$ICON_DIR"
 cp "$SRC_DIR/art_downloader.py" "$APP_DIR/art_downloader.py"
-cp "$SRC_DIR/assets/icon.svg" "$ICON"
+cp "$SRC_DIR/assets/icon.png" "$ICON"
+cp "$SRC_DIR/assets/icon.png" "$APP_DIR/icon.png"   # window icon
+rm -f "$OLD_ICON"
 
 cat > "$APP_DIR/uninstall.sh" <<EOF
 #!/bin/bash

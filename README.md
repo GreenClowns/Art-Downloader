@@ -2,7 +2,7 @@
 
 **English** · [Русский](README.ru.md)
 
-A simple Linux desktop app for downloading art and comics from **DeviantArt** (and other sites supported by [gallery-dl](https://github.com/mikf/gallery-dl)) — whole folders at once, in reading order, with no mixed-up files.
+A simple desktop app for **Windows and Linux** for downloading art and comics from **DeviantArt** (and other sites supported by [gallery-dl](https://github.com/mikf/gallery-dl)) — whole folders at once, in reading order, with no mixed-up files.
 
 ![App window](docs/screenshot.png)
 
@@ -33,7 +33,19 @@ ArtDownloads/My Comic/
 
 ## Installation
 
-Requires Linux (tested on Fedora; Ubuntu/Debian work too).
+### Windows
+
+1. Open [**Releases**](https://github.com/GreenClowns/Art-Downloader/releases/latest) and download `ArtDownloader-…-Setup.exe`.
+2. Run it. No administrator rights are needed, and nothing else has to be installed — gallery-dl is built in.
+3. Start **Art Downloader** from the Start menu.
+
+> Windows may show “Windows protected your PC” because the app isn't code-signed. Click **More info → Run anyway**.
+
+Prefer no installation? Download `ArtDownloader-…-portable.zip`, unpack it anywhere and run `ArtDownloader.exe`.
+
+### Linux
+
+Tested on Fedora; Ubuntu/Debian work too.
 
 1. Click the green **Code → Download ZIP** button and unpack the archive.
 2. Open a terminal in the unpacked folder and run once:
@@ -69,11 +81,13 @@ Click “Connect DeviantArt” and download again. Without it, DeviantArt only g
 Usually that's paid content (subscriptions, Premium Gallery). You can only download it if you have access to it on the site. The app lists these files at the end of the log.
 
 **Where are the settings stored?**
-In `~/.config/art_downloader.json`. Your password is never written there.
+Linux: `~/.config/art_downloader.json`. Windows: `%APPDATA%\ArtDownloader\settings.json`. Your password is never written there.
 
 ## Uninstall
 
-Right-click the app icon in the menu → **“Uninstall Art Downloader”**. Or:
+**Windows:** Settings → Apps → Art Downloader → Uninstall.
+
+**Linux:** right-click the app icon in the menu → **“Uninstall Art Downloader”**. Or:
 
 ```bash
 bash install.sh uninstall
@@ -88,6 +102,8 @@ The whole app is a single file, [`art_downloader.py`](art_downloader.py) (Python
 ```bash
 python3 -m pytest
 ```
+
+The Windows build is made by GitHub Actions ([`windows.yml`](.github/workflows/windows.yml)): PyInstaller bundles the app together with gallery-dl, Inno Setup makes the installer. Pushing a tag such as `v1.0.0` publishes a release. Icons are generated from the logo with `python3 tools/make_icons.py`.
 
 ## Respect the artists
 

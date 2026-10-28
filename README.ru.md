@@ -2,7 +2,7 @@
 
 [English](README.md) · **Русский**
 
-Простая программа с окном для Linux, чтобы скачивать арты и комиксы с **DeviantArt** (и других сайтов, которые поддерживает [gallery-dl](https://github.com/mikf/gallery-dl)) — целыми папками, по порядку и без путаницы в файлах.
+Простая программа с окном для **Windows и Linux**, чтобы скачивать арты и комиксы с **DeviantArt** (и других сайтов, которые поддерживает [gallery-dl](https://github.com/mikf/gallery-dl)) — целыми папками, по порядку и без путаницы в файлах.
 
 ![Окно программы](docs/screenshot-ru.png)
 
@@ -33,7 +33,19 @@ ArtDownloads/My Comic/
 
 ## Установка
 
-Нужен Linux (проверено на Fedora; Ubuntu/Debian тоже подходят).
+### Windows
+
+1. Открой [**Releases**](https://github.com/GreenClowns/Art-Downloader/releases/latest) и скачай `ArtDownloader-…-Setup.exe`.
+2. Запусти его. Права администратора не нужны, и ничего дополнительно ставить не надо — gallery-dl уже встроен.
+3. Открывай **Art Downloader** из меню «Пуск».
+
+> Windows может показать «Система Windows защитила ваш компьютер», потому что у программы нет цифровой подписи. Нажми **Подробнее → Выполнить в любом случае**.
+
+Не хочешь устанавливать? Скачай `ArtDownloader-…-portable.zip`, распакуй куда угодно и запусти `ArtDownloader.exe`.
+
+### Linux
+
+Проверено на Fedora; Ubuntu/Debian тоже подходят.
 
 1. Нажми зелёную кнопку **Code → Download ZIP** и распакуй архив.
 2. Открой терминал в распакованной папке и выполни один раз:
@@ -69,11 +81,13 @@ bash install.sh
 Обычно это платный контент (подписка, Premium Gallery). Его можно скачать, только если у тебя есть доступ к нему на сайте. Список таких файлов программа выводит в конце журнала.
 
 **Где хранятся настройки?**
-В `~/.config/art_downloader.json`. Пароль туда не записывается.
+Linux: `~/.config/art_downloader.json`. Windows: `%APPDATA%\ArtDownloader\settings.json`. Пароль туда не записывается.
 
 ## Удаление
 
-Правый клик по значку в меню → **«Удалить Art Downloader»**. Или:
+**Windows:** Параметры → Приложения → Art Downloader → Удалить.
+
+**Linux:** правый клик по значку в меню → **«Удалить Art Downloader»**. Или:
 
 ```bash
 bash install.sh удалить
@@ -88,6 +102,8 @@ bash install.sh удалить
 ```bash
 python3 -m pytest
 ```
+
+Версию для Windows собирает GitHub Actions ([`windows.yml`](.github/workflows/windows.yml)): PyInstaller упаковывает программу вместе с gallery-dl, Inno Setup делает установщик. Метка вроде `v1.0.0` публикует выпуск. Значки делаются из логотипа командой `python3 tools/make_icons.py`.
 
 ## Уважай авторов
 
