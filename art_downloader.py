@@ -72,6 +72,8 @@ DA_FILE_RE = re.compile(r"^da(\d+)_(\d+)_(.*?)(\.[^.]+)?$")
 # Line printed by gallery-dl while collecting the list of works
 COLLECT_FMT = "@@{index}\t{published_time}\t{folder[title]}\t{title}"
 COLLECT_RE = re.compile(r"^@@(\d+)\t([^\t]*)\t([^\t]*)\t(.*)$")
+# gallery-dl prints "[3/10] https://…" before each link from an input file
+PROGRESS_RE = re.compile(r"^\[(\d+)/(\d+)\] \S")
 CHAPTER_RE = re.compile(
     r"(?<![^\W_])(?:chapter|chap|ch|глава|episode|ep)\.?[\s_\-]*(\d+)",
     re.IGNORECASE,
@@ -369,70 +371,96 @@ def title_number(title):
     return int(numbers[-1]) if numbers else None
 
 
+def title_numbers(title):
+    """
+    All numbers in a title, in order: "Chapter 2 - Part 4" → (2, 4),
+    "Chapter 2 Cover" → (2,), "A Special Tea - 19" → (19,). Comparing these
+    tuples puts a cover before its pages and chapter 2 before chapter 10,
+    whatever the punctuation.
+    """
+    return tuple(int(n) for n in re.findall(r"\d+", title or ""))
+
+
 def resolve_mode(mode, titles):
     """
-    'auto' becomes 'name' when nearly every title carries its own number
-    (typical for comics: "Part 19", "Chapter 3"), otherwise 'date'.
+    'auto' becomes 'numbers' when nearly every title carries numbers that
+    tell the works apart (comics: "Part 19", "Chapter 3 - Page 2"),
+    otherwise 'date'.
     """
     if mode != "auto":
         return mode
     titles = [t for t in titles if t]
     if len(titles) < 2:
         return "date"
-    numbers = [n for n in map(title_number, titles) if n is not None]
-    if (len(numbers) >= 0.8 * len(titles)
-            and len(set(numbers)) >= 0.8 * len(numbers)):
-        return "name"
+    numbered = [n for n in map(title_numbers, titles) if n]
+    if (len(numbered) >= 0.8 * len(titles)
+            and len(set(numbered)) >= 0.8 * len(numbered)):
+        return "numbers"
     return "date"
 
 
 def order_meta(value):
-    """Order entry as (group, pos, published, title, seq), old format too."""
+    """
+    Order entry as (group, pos, published, title, seq, specific); older
+    files have fewer fields. `specific` is False when the folder name had
+    to be guessed from the link (e.g. the author's whole gallery).
+    """
     group, pos = value[0], value[1]
     published = value[2] if len(value) > 2 else 0
     title = value[3] if len(value) > 3 else None
     seq = value[4] if len(value) > 4 else pos
-    return group, pos, published, title, seq
+    specific = bool(value[5]) if len(value) > 5 else True
+    return group, pos, published, title, seq, specific
 
 
 def build_order(entries, mode, existing=None):
     """
-    entries:  [(index, published, group, title), …] in the order the site
-              returned them (gallery order).
+    entries:  [(index, published, group, title[, specific]), …] in the
+              order the site returned them (gallery order).
     mode:     one of ORDER_KEYS.
     existing: previous result — works not in `entries` are kept and ranked
               together with the new ones.
-    Returns {index: [group, pos, published, title, seq]} with positions
-    1, 2, 3, … in each group, in the requested order.
+    A work found in several links goes to the most specific folder (a
+    chapter folder rather than the author's whole gallery).
+    Returns {index: [group, pos, published, title, seq, specific]} with
+    positions 1, 2, 3, … in each group, in the requested order.
     """
     items = {}
     for idx, value in (existing or {}).items():
         items[idx] = list(order_meta(value))
-    seen = set()
-    for seq, (idx, published, group, title) in enumerate(entries):
-        if idx in seen:
-            continue
-        seen.add(idx)
+    taken = {}                       # idx -> specific flag chosen this run
+    for seq, entry in enumerate(entries):
+        idx, published, group, title = entry[:4]
+        specific = bool(entry[4]) if len(entry) > 4 else True
+        if idx in taken and (taken[idx] or not specific):
+            continue                 # keep the first, unless this is better
         old = items.get(idx)
-        items[idx] = [group, old[1] if old else 10**9, published or 0,
+        if idx not in taken and old and old[5] and not specific:
+            group = old[0]           # don't pull it back to a vaguer folder
+            specific = True
+        taken[idx] = specific
+        items[idx] = [group, old[1] if old and old[0] == group else 10**9,
+                      published or 0,
                       clean_title(title) if title else (old[3] if old else None),
-                      seq]
+                      seq, specific]
 
     groups = {}
-    for idx, (group, pos, published, title, seq) in items.items():
-        groups.setdefault(group, []).append((idx, pos, published, title, seq))
+    for idx, value in items.items():
+        groups.setdefault(value[0], []).append((idx, *value[1:]))
 
     order = {}
     for group, members in groups.items():
         mode_here = resolve_mode(mode, [m[3] for m in members])
         if mode_here == "date":
             members.sort(key=lambda m: (m[2] or 0, m[4], m[1]))
+        elif mode_here == "numbers":
+            members.sort(key=lambda m: (title_numbers(m[3]), m[2] or 0, m[4], m[1]))
         elif mode_here == "name":
             members.sort(key=lambda m: (natural_key(m[3]), m[4], m[1]))
         else:  # gallery order
             members.sort(key=lambda m: (m[4], m[1]))
-        for pos, (idx, _, published, title, seq) in enumerate(members, 1):
-            order[idx] = [group, pos, published, title, seq]
+        for pos, (idx, _, published, title, seq, specific) in enumerate(members, 1):
+            order[idx] = [group, pos, published, title, seq, specific]
     return order
 
 
@@ -486,26 +514,35 @@ def titles_from_disk(dest, order):
 
 def renumber(dest, old, new):
     """
-    Renames files already on disk from the old numbers to the new ones
-    (two passes, so no name ever collides). Also tidies spacing in names.
-    Returns how many files were renamed.
+    Renames files already on disk from their old numbers to the new ones,
+    and moves them if their work now belongs to another folder (two passes,
+    so no name ever collides). Also tidies spacing in names.
+    Returns how many files were renamed or moved.
     """
     dest = Path(dest)
-    moves = []
-    groups = {v[0] for v in new.values()}
-    for group in groups:
-        if not is_safe_component(group) or not inside(dest, dest / group):
+    safe = lambda g: is_safe_component(g) and inside(dest, dest / g)
+    on_disk = {}
+    for group in {v[0] for v in old.values()}:
+        if safe(group):
+            for path, pos, num, title, ext in scan_group(dest / group):
+                on_disk.setdefault((group, pos), []).append(
+                    (path, num, title, ext))
+    moves, emptied = [], set()
+    for idx, value in new.items():
+        if idx not in old:
             continue
-        mapping = {}
-        for idx, value in new.items():
-            if value[0] == group and idx in old and old[idx][0] == group:
-                mapping[old[idx][1]] = value[1]
+        old_group, old_pos = old[idx][0], old[idx][1]
+        group, pos = value[0], value[1]
+        if not safe(group):
+            continue
         width = group_width(new, group)
-        for path, pos, num, title, ext in scan_group(dest / group):
-            if pos not in mapping:
-                continue
-            target = path.with_name(numbered_name(mapping[pos], width, num,
-                                                  title, ext))
+        for path, num, title, ext in on_disk.get((old_group, old_pos), ()):
+            name = numbered_name(pos, width, num, title, ext)
+            if group == old_group:
+                target = path.with_name(name)     # stays (also in Chapter NN)
+            else:
+                target = dest / group / name
+                emptied.add(path.parent)
             if target != path:
                 moves.append((path, target))
     temps = []
@@ -514,7 +551,15 @@ def renumber(dest, old, new):
         path.rename(tmp)
         temps.append((tmp, target))
     for tmp, target in temps:
+        target.parent.mkdir(parents=True, exist_ok=True)
         tmp.rename(unique_path(target))   # never overwrite another file
+    for folder in sorted(emptied, key=lambda p: -len(p.parts)):
+        for d in (folder, folder.parent):  # Chapter NN, then the group folder
+            try:
+                if d != dest and inside(dest, d) and not any(d.iterdir()):
+                    d.rmdir()
+            except OSError:
+                pass
     return len(moves)
 
 
@@ -588,14 +633,12 @@ def organize(dest, order, risky=None):
             name, group, target_dir = f.name, ".", dest
         if not inside(dest, target_dir / name):
             group, target_dir, name = ".", dest, Path(f.name).name
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / name
-        if target.exists():
-            if target.is_file() and target.stat().st_size == f.stat().st_size:
-                f.unlink()                    # same file downloaded again
-                continue
-            target = unique_path(target)      # never overwrite another file
-        f.replace(target)
+        chapter = chapter_folder(name)
+        if group != "." and chapter and (target_dir / chapter).is_dir():
+            target_dir = target_dir / chapter  # folder already split
+        target = place(f, target_dir / name)   # drops exact duplicates
+        if target is None:
+            continue
         moved[group] = moved.get(group, 0) + 1
         if risky is not None and target.suffix.lower() in RISKY_EXTENSIONS:
             risky.append(str(target.relative_to(dest)))
@@ -614,28 +657,65 @@ def chapter_folder(filename):
     return f"Chapter {int(m.group(1)):02d}"
 
 
+def same_file(a, b):
+    """Two files that are the same download (same size and same bytes)."""
+    try:
+        if a.stat().st_size != b.stat().st_size:
+            return False
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            while True:
+                x, y = fa.read(1 << 20), fb.read(1 << 20)
+                if x != y:
+                    return False
+                if not x:
+                    return True
+    except OSError:
+        return False
+
+
+def place(src, target):
+    """
+    Moves `src` to `target`. If an identical file is already there, the
+    extra copy is removed; a different file is never overwritten.
+    Returns the final path, or None if `src` was a duplicate.
+    """
+    if target.exists():
+        if same_file(src, target):
+            src.unlink()
+            return None
+        target = unique_path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    src.replace(target)
+    return target
+
+
 def sort_into_chapters(folder):
     """
-    If one folder holds several chapters, move them into Chapter NN.
-    Files without a chapter in the name stay put. Nothing is deleted.
+    If one folder holds several chapters with several files each, move them
+    into Chapter NN. A folder where every "chapter" is a single file (e.g.
+    height charts per chapter) stays as it is. Files without a chapter in
+    the name stay put. Nothing is deleted except exact duplicates.
     """
     folder = Path(folder)
     files = [f for f in sorted(folder.iterdir())
              if f.is_file() and not f.name.startswith(".")
              and not (f.name.startswith("links") and f.suffix == ".txt")]
     chapters = {f: chapter_folder(f.name) for f in files}
-    present = {c for c in chapters.values() if c}
-    present |= {d.name for d in folder.iterdir()
-                if d.is_dir() and CHAPTER_DIR_RE.match(d.name)}
-    if len(present) < 2:
+    counts = {}
+    for c in chapters.values():
+        if c:
+            counts[c] = counts.get(c, 0) + 1
+    for d in folder.iterdir():
+        if d.is_dir() and CHAPTER_DIR_RE.match(d.name):
+            counts[d.name] = counts.get(d.name, 0) + sum(
+                1 for f in d.iterdir() if f.is_file())
+    if len(counts) < 2 or sum(counts.values()) < 2 * len(counts):
         return {}
     moved = {}
     for f, ch in chapters.items():
         if not ch:
             continue
-        (folder / ch).mkdir(exist_ok=True)
-        if not (folder / ch / f.name).exists():
-            f.rename(folder / ch / f.name)
+        if place(f, folder / ch / f.name):
             moved[ch] = moved.get(ch, 0) + 1
     return moved
 
@@ -791,6 +871,8 @@ class App:
         self.stats = {"done": 0, "skip": 0, "err": 0}
         self.failed = []
         self.counting_skips = True
+        self.total_works = 0
+        self.works_started = 0
 
         cfg = migrate_config(self.load_config())
         set_lang(cfg.get("lang") or detect_lang())
@@ -1221,6 +1303,12 @@ class App:
             f"скачано {s['done']} · пропущено {s['skip']} · ошибок {s['err']}",
             f"{s['done']} downloaded · {s['skip']} skipped · {s['err']} errors"))
 
+    def show_progress(self, fraction):
+        """Real progress once gallery-dl reports "k of N"."""
+        self.progress.stop()
+        self.progress.configure(mode="determinate", progress_color=ACCENT)
+        self.progress.set(fraction)
+
     def set_running(self, running):
         self.running = running
         if running:
@@ -1274,6 +1362,8 @@ class App:
         self.stats = {"done": 0, "skip": 0, "err": 0}
         self.failed = []
         self.counting_skips = True
+        self.total_works = 0
+        self.works_started = 0
         self.update_stats()
         self.stop_flag.clear()
         self.set_running(True)
@@ -1451,7 +1541,8 @@ class App:
                     if item:
                         idx, published, ftitle, title = item
                         found.append((idx, published,
-                                      group_name(ftitle, url), title))
+                                      group_name(ftitle, url), title,
+                                      ftitle not in ("", "None")))
                     elif line.strip():
                         self.emit("line", line)
 
@@ -1545,6 +1636,7 @@ class App:
             self.emit("status", tr(f"Скачиваю: {len(final)} ссылок, потоков: {n}…",
                                    f"Downloading: {len(final)} links, "
                                    f"{n} threads…"))
+            self.emit("total", len(final))
             self.download_parallel(final, inc, archive, args, n)
             if self.stop_flag.is_set():
                 result = "stopped"
@@ -1558,6 +1650,7 @@ class App:
                     self.emit("retry", len(failed))
                     self.emit("status", tr(f"Повторяю: {len(again)} ссылок…",
                                            f"Retrying: {len(again)} links…"))
+                    self.emit("total", len(again))
                     self.download_parallel(again, inc, archive, args, 1)
                     if self.stop_flag.is_set():
                         result = "stopped"
@@ -1592,6 +1685,10 @@ class App:
     def handle_line(self, line):
         """Parses one line of gallery-dl output and updates the counters."""
         if not line.strip():
+            return
+        if PROGRESS_RE.match(line):          # progress, not worth a log line
+            self.works_started += 1
+            self.update_progress()
             return
         low = line.lower()
         if line.startswith("# "):
@@ -1630,6 +1727,15 @@ class App:
             self.log(line, "info")
         self.update_stats()
 
+    def update_progress(self):
+        total = self.total_works
+        if not total:
+            return
+        done = min(self.works_started, total)
+        self.var_status.set(tr(f"Скачиваю: {done} из {total}",
+                               f"Downloading: {done} of {total}"))
+        self.show_progress(done / total)
+
     def poll_events(self):
         try:
             while True:
@@ -1652,6 +1758,8 @@ class App:
                     box, done = payload
                     box.extend(self.failed)
                     done.set()
+                elif kind == "total":
+                    self.total_works, self.works_started = payload, 0
                 elif kind == "retry":
                     self.log(tr(f"— Не скачалось {payload}. Пробую ещё раз…",
                                 f"— {payload} failed. Trying again…"), "info")

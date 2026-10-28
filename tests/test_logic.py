@@ -206,17 +206,42 @@ def test_organize_numbers_and_multi_images(tmp_path):
 def test_chapter_split_only_when_mixed(tmp_path):
     mixed = tmp_path / "All"
     mixed.mkdir()
-    for n in ["001 - X - Chapter 1 - Part 1.png", "002 - X - Chapter 2 - Part 1.png",
-              "003 - Cover.png"]:
+    for n in ["001 - X - Chapter 1 - Part 1.png", "002 - X - Chapter 1 - Part 2.png",
+              "003 - X - Chapter 2 - Part 1.png", "004 - X - Chapter 2 - Part 2.png",
+              "005 - Cover.png"]:
         (mixed / n).touch()
     single = tmp_path / "Tea"
     single.mkdir()
     (single / "001 - Tea - Chapter 3.png").touch()
 
     result = a.sort_all_chapters(tmp_path)
-    assert result == {"All/Chapter 01": 1, "All/Chapter 02": 1}
-    assert (mixed / "003 - Cover.png").exists()            # без главы — на месте
-    assert (single / "001 - Tea - Chapter 3.png").exists()  # одна глава — не делим
+    assert result == {"All/Chapter 01": 2, "All/Chapter 02": 2}
+    assert (mixed / "005 - Cover.png").exists()            # no chapter: stays
+    assert (single / "001 - Tea - Chapter 3.png").exists()  # one chapter: no split
+
+
+def test_one_file_per_chapter_is_not_split(tmp_path):
+    hc = tmp_path / "Height Charts"
+    hc.mkdir()
+    for c in range(1, 5):
+        (hc / f"00{c} - Height Chart - Chapter {c}.png").touch()
+    assert a.sort_all_chapters(tmp_path) == {}
+    assert len(list(hc.glob("*.png"))) == 4
+
+
+def test_new_file_joins_existing_chapter_folder_and_duplicates_vanish(tmp_path):
+    ch = tmp_path / "Mei" / "Chapter 02"
+    ch.mkdir(parents=True)
+    (ch / "006 - Mei Chapter 2 - Page 1.png").write_text("same")
+    inc = tmp_path / a.INCOMING
+    inc.mkdir()
+    (inc / "da6_01_Mei Chapter 2 - Page 1.png").write_text("same")   # re-download
+    (inc / "da7_01_Mei Chapter 2 - Page 2.png").write_text("new")
+    order = {"6": ["Mei", 6], "7": ["Mei", 7]}
+    a.organize(tmp_path, order)
+    assert sorted(p.name for p in ch.iterdir()) == [
+        "006 - Mei Chapter 2 - Page 1.png", "007 - Mei Chapter 2 - Page 2.png"]
+    assert not list((tmp_path / "Mei").glob("*.png"))       # nothing left outside
 
 
 def test_chapter_folder_regex():
@@ -310,3 +335,53 @@ def test_risky_downloads_are_reported(tmp_path):
     risky = []
     a.organize(tmp_path, {}, risky)
     assert risky == ["setup.exe"]
+
+
+# ------------------------------------------------- reading order, folders
+
+def test_auto_handles_chapter_and_page_numbers():
+    # page 3 of chapter 2 was re-uploaded much later; covers named differently
+    entries = [("c1", 10, "M", "Mei Chapter 1 Cover"),
+               ("p11", 11, "M", "Mei Chapter 1 - Page 1"),
+               ("p12", 12, "M", "Mei Chapter 1 - Page 2"),
+               ("c2", 20, "M", "Mei Chapter 2 Cover"),
+               ("p21", 21, "M", "Mei Chapter 2 - Page 1"),
+               ("p22", 999, "M", "Mei Chapter 2 - Page 2"),
+               ("p210", 30, "M", "Mei Chapter 2 - Page 10")]
+    order = a.build_order(entries, BY_AUTO)
+    assert sorted(order, key=lambda i: order[i][1]) == [
+        "c1", "p11", "p12", "c2", "p21", "p22", "p210"]
+
+
+def test_auto_keeps_date_order_when_numbers_do_not_differ():
+    entries = [("m%d" % i, i, "Cal", f"Calendar - Month {m} 2025")
+               for i, m in enumerate(["Jan", "Feb", "Mar"])]
+    order = a.build_order(entries, BY_AUTO)
+    assert [order[f"m{i}"][1] for i in range(3)] == [1, 2, 3]
+
+
+def test_work_goes_to_the_most_specific_folder():
+    entries = [("1", 1, "al3ksgts", "Part 1", False),      # whole gallery
+               ("1", 1, "Chapter 1", "Part 1", True)]      # its chapter
+    assert a.build_order(entries, BY_AUTO)["1"][0] == "Chapter 1"
+    # once in its chapter folder, a later "whole gallery" link keeps it there
+    first = a.build_order([("1", 1, "Chapter 1", "Part 1", True)], BY_AUTO)
+    again = a.build_order([("1", 1, "al3ksgts", "Part 1", False)], BY_AUTO, first)
+    assert again["1"][0] == "Chapter 1"
+
+
+def test_renumber_moves_files_to_their_new_folder(tmp_path):
+    (tmp_path / "al3ksgts").mkdir()
+    (tmp_path / "al3ksgts" / "001 - Part 1.png").write_text("p1")
+    (tmp_path / "al3ksgts" / "002 - Other.png").write_text("o")
+    old = {"1": ["al3ksgts", 1, 0, "Part 1", 0, False],
+           "2": ["al3ksgts", 2, 0, "Other", 1, False]}
+    new = a.build_order([("1", 0, "Chapter 1", "Part 1", True)], BY_AUTO, old)
+    a.renumber(tmp_path, old, new)
+    assert (tmp_path / "Chapter 1" / "001 - Part 1.png").read_text() == "p1"
+    assert (tmp_path / "al3ksgts" / "001 - Other.png").read_text() == "o"
+
+
+def test_progress_lines_are_recognized():
+    assert a.PROGRESS_RE.match("[3/10] https://www.deviantart.com/view/1")
+    assert not a.PROGRESS_RE.match("[download][error] Failed to download x")
