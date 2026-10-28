@@ -51,7 +51,8 @@ KEY = "" if WINDOWS else "🔑 "
 CREATE_NO_WINDOW = 0x08000000               # hide console windows on Windows
 
 BROWSER_KEYS = ["firefox", "chrome", "chromium", "none"]
-ORDER_KEYS = ["date", "gallery", "name"]
+ORDER_KEYS = ["auto", "date", "gallery", "name"]
+SETTINGS_VERSION = 2
 
 LINKS_FILE = "links.txt"
 ARCHIVE_FILE = ".downloaded.sqlite3"
@@ -109,6 +110,17 @@ def get_lang():
     return _lang
 
 
+def files_word(n):
+    """'3 файла' / '5 файлов' / '1 file' / '2 files'."""
+    if _lang != "ru":
+        return f"{n} file" + ("" if n == 1 else "s")
+    if n % 10 == 1 and n % 100 != 11:
+        return f"{n} файл"
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return f"{n} файла"
+    return f"{n} файлов"
+
+
 def tr(ru, en):
     """Pick the string for the current interface language."""
     return ru if _lang == "ru" else en
@@ -121,7 +133,8 @@ def browser_label(key):
 
 
 def order_label(key):
-    return {"date": tr("по дате публикации", "by publication date"),
+    return {"auto": tr("автоматически", "automatic"),
+            "date": tr("по дате публикации", "by publication date"),
             "gallery": tr("как в галерее", "as in the gallery"),
             "name": tr("по названию", "by title")}[key]
 
@@ -134,7 +147,12 @@ def migrate_config(cfg):
     if cfg.get("order") in old_order:
         cfg["order"] = old_order[cfg["order"]]
     if cfg.get("order") not in ORDER_KEYS:
-        cfg["order"] = "date"
+        cfg["order"] = "auto"
+    # "date" was the old default; "auto" gets comics right, so switch once
+    if cfg.get("settings_version", 1) < SETTINGS_VERSION:
+        if cfg["order"] == "date":
+            cfg["order"] = "auto"
+        cfg["settings_version"] = SETTINGS_VERSION
     if cfg.get("browser") in ("не брать из браузера", "без входа"):
         cfg["browser"] = "none"
     if cfg.get("browser") not in BROWSER_KEYS:
@@ -283,34 +301,174 @@ def natural_key(s):
             for t in re.split(r"(\d+)", s or "")]
 
 
+def clean_title(title):
+    """Title without doubled or leading/trailing spaces."""
+    return re.sub(r"\s+", " ", title or "").strip()
+
+
+def title_number(title):
+    """The last number in a title ("A Special Tea - 19" → 19) or None."""
+    numbers = re.findall(r"\d+", title or "")
+    return int(numbers[-1]) if numbers else None
+
+
+def resolve_mode(mode, titles):
+    """
+    'auto' becomes 'name' when nearly every title carries its own number
+    (typical for comics: "Part 19", "Chapter 3"), otherwise 'date'.
+    """
+    if mode != "auto":
+        return mode
+    titles = [t for t in titles if t]
+    if len(titles) < 2:
+        return "date"
+    numbers = [n for n in map(title_number, titles) if n is not None]
+    if (len(numbers) >= 0.8 * len(titles)
+            and len(set(numbers)) >= 0.8 * len(numbers)):
+        return "name"
+    return "date"
+
+
+def order_meta(value):
+    """Order entry as (group, pos, published, title, seq), old format too."""
+    group, pos = value[0], value[1]
+    published = value[2] if len(value) > 2 else 0
+    title = value[3] if len(value) > 3 else None
+    seq = value[4] if len(value) > 4 else pos
+    return group, pos, published, title, seq
+
+
 def build_order(entries, mode, existing=None):
     """
     entries:  [(index, published, group, title), …] in the order the site
               returned them (gallery order).
     mode:     one of ORDER_KEYS.
-    existing: previous result {index: [group, pos]} — numbers already given
-              never change, new works are appended at the end.
-    Returns {index: [group, pos]}.
+    existing: previous result — works not in `entries` are kept and ranked
+              together with the new ones.
+    Returns {index: [group, pos, published, title, seq]} with positions
+    1, 2, 3, … in each group, in the requested order.
     """
-    order = {k: list(v) for k, v in (existing or {}).items()}
-    groups = {}
+    items = {}
+    for idx, value in (existing or {}).items():
+        items[idx] = list(order_meta(value))
+    seen = set()
     for seq, (idx, published, group, title) in enumerate(entries):
-        if idx in order or any(idx == e[0] for e in groups.get(group, ())):
+        if idx in seen:
             continue
-        groups.setdefault(group, []).append((idx, published, title, seq))
+        seen.add(idx)
+        old = items.get(idx)
+        items[idx] = [group, old[1] if old else 10**9, published or 0,
+                      clean_title(title) if title else (old[3] if old else None),
+                      seq]
 
-    for group, items in groups.items():
-        if mode == "date":
-            items.sort(key=lambda e: (e[1] or 0, e[3]))
-        elif mode == "name":
-            items.sort(key=lambda e: (natural_key(e[2]), e[3]))
+    groups = {}
+    for idx, (group, pos, published, title, seq) in items.items():
+        groups.setdefault(group, []).append((idx, pos, published, title, seq))
+
+    order = {}
+    for group, members in groups.items():
+        mode_here = resolve_mode(mode, [m[3] for m in members])
+        if mode_here == "date":
+            members.sort(key=lambda m: (m[2] or 0, m[4], m[1]))
+        elif mode_here == "name":
+            members.sort(key=lambda m: (natural_key(m[3]), m[4], m[1]))
         else:  # gallery order
-            items.sort(key=lambda e: e[3])
-        pos = max([p for g, p in order.values() if g == group], default=0)
-        for idx, _, _, _ in items:
-            pos += 1
-            order[idx] = [group, pos]
+            members.sort(key=lambda m: (m[4], m[1]))
+        for pos, (idx, _, published, title, seq) in enumerate(members, 1):
+            order[idx] = [group, pos, published, title, seq]
     return order
+
+
+DISK_NAME_RE = re.compile(r"^(\d+)(?:-(\d+))? - (.*?)(\.[^.]+)?$")
+
+
+def group_width(order, group):
+    top = max((v[1] for v in order.values() if v[0] == group), default=0)
+    return max(3, len(str(top)))
+
+
+def numbered_name(pos, width, num, title, ext):
+    name = f"{pos:0{width}d}"
+    if num > 1:
+        name += f"-{num:02d}"
+    return f"{name} - {clean_title(title)}{ext or ''}"
+
+
+def scan_group(folder):
+    """Numbered files of a gallery folder (and its Chapter NN subfolders)."""
+    folder = Path(folder)
+    found = []
+    if not folder.is_dir():
+        return found
+    dirs = [folder] + [d for d in sorted(folder.iterdir())
+                       if d.is_dir() and CHAPTER_DIR_RE.match(d.name)]
+    for d in dirs:
+        for f in sorted(d.iterdir()):
+            m = DISK_NAME_RE.match(f.name) if f.is_file() else None
+            if m:
+                found.append((f, int(m.group(1)), int(m.group(2) or 1),
+                              m.group(3), m.group(4) or ""))
+    return found
+
+
+def titles_from_disk(dest, order):
+    """Fills in titles missing from older .order.json files."""
+    order = {k: list(order_meta(v)) for k, v in order.items()}
+    by_group = {}
+    for idx, v in order.items():
+        if not v[3]:
+            by_group.setdefault(v[0], {})[v[1]] = idx
+    for group, by_pos in by_group.items():
+        for _path, pos, num, title, _ext in scan_group(Path(dest) / group):
+            if pos in by_pos and num == 1:
+                order[by_pos[pos]][3] = clean_title(title)
+    return order
+
+
+def renumber(dest, old, new):
+    """
+    Renames files already on disk from the old numbers to the new ones
+    (two passes, so no name ever collides). Also tidies spacing in names.
+    Returns how many files were renamed.
+    """
+    dest = Path(dest)
+    moves = []
+    groups = {v[0] for v in new.values()}
+    for group in groups:
+        mapping = {}
+        for idx, value in new.items():
+            if value[0] == group and idx in old and old[idx][0] == group:
+                mapping[old[idx][1]] = value[1]
+        width = group_width(new, group)
+        for path, pos, num, title, ext in scan_group(dest / group):
+            if pos not in mapping:
+                continue
+            target = path.with_name(numbered_name(mapping[pos], width, num,
+                                                  title, ext))
+            if target != path:
+                moves.append((path, target))
+    temps = []
+    for i, (path, target) in enumerate(moves):
+        tmp = path.with_name(f".renumber-{i}-{path.name}")
+        path.rename(tmp)
+        temps.append((tmp, target))
+    for tmp, target in temps:
+        if target.exists():          # never overwrite — keep the old name
+            target = target.with_name(f"{target.stem} (2){target.suffix}")
+        tmp.rename(target)
+    return len(moves)
+
+
+def reorder(dest, mode):
+    """Re-sorts what's already downloaded, without the internet."""
+    old = load_order(dest)
+    if not old:
+        return 0
+    filled = titles_from_disk(dest, old)
+    new = build_order([], mode, filled)
+    count = renumber(dest, old, new)
+    save_order(dest, new)
+    return count
 
 
 def load_order(dest):
@@ -335,25 +493,18 @@ def organize(dest, order):
     inc = dest / INCOMING
     if not inc.is_dir():
         return {}
-    widths = {}
-    for group, pos in order.values():
-        widths[group] = max(widths.get(group, 3), len(str(pos)))
-
     moved = {}
     for f in sorted(inc.iterdir()):
         if not f.is_file() or f.suffix == ".part" or f.name.startswith("."):
             continue
         m = DA_FILE_RE.match(f.name)
         if m and m.group(1) in order:
-            group, pos = order[m.group(1)]
+            group, pos = order[m.group(1)][0], order[m.group(1)][1]
             num, title, ext = int(m.group(2)), m.group(3), m.group(4) or ""
-            name = f"{pos:0{widths[group]}d}"
-            if num > 1:
-                name += f"-{num:02d}"
-            name += f" - {title}{ext}"
+            name = numbered_name(pos, group_width(order, group), num, title, ext)
             target_dir = dest / group
         elif m:      # DeviantArt, but order unknown
-            num, title, ext = int(m.group(2)), m.group(3), m.group(4) or ""
+            num, title, ext = int(m.group(2)), clean_title(m.group(3)), m.group(4) or ""
             name = title + (f" ({num})" if num > 1 else "") + ext
             group, target_dir = ".", dest
         else:        # other sites — keep as is
@@ -639,8 +790,8 @@ class App:
         self.cmb_order = KeyedCombo(frm_opt, ORDER_KEYS, order_label,
                                     self.order_key)
         self.cmb_order.widget.grid(row=0, column=1, sticky="w", padx=6, pady=4)
-        ttk.Label(frm_opt, text=tr("файлы: 001 - …, 002 - …",
-                                   "files: 001 - …, 002 - …"),
+        ttk.Label(frm_opt, text=tr("авто: по номеру в названии, если он есть",
+                                   "auto: by the number in the title, if any"),
                   **grey).grid(row=0, column=2, sticky="w")
         ttk.Label(frm_opt, text=tr("Скачивать одновременно:",
                                    "Parallel downloads:")).grid(
@@ -769,6 +920,7 @@ class App:
                 "username": self.var_user.get().strip(),
                 "threads": self.threads(),
                 "order": self.cmb_order.get(),
+                "settings_version": SETTINGS_VERSION,
                 "retry": self.var_retry.get(),
                 "sort": self.var_sort.get(),
                 "da_connected": self.da_connected,
@@ -955,6 +1107,7 @@ class App:
                                               f"Folder doesn't exist yet:\n{folder}"))
             return
         self.report_organized(organize(folder, load_order(folder)))
+        self.report_renumbered(reorder(folder, self.cmb_order.get()))
         if self.var_sort.get():
             self.report_sorted(sort_all_chapters(folder))
 
@@ -962,18 +1115,23 @@ class App:
         if not moved:
             return
         total = sum(moved.values())
-        self.log(tr(f"Разложено по папкам: {total} файлов",
-                    f"Organized into folders: {total} files"), "ok")
+        self.log(tr("Разложено по папкам: ", "Organized into folders: ")
+                 + files_word(total), "ok")
         for name in sorted(moved):
             label = tr("основная папка", "main folder") if name == "." else name
             self.log(f"   {label}: {moved[name]}", "ok")
+
+    def report_renumbered(self, count):
+        if count:
+            self.log(tr("Перенумеровано по порядку: ", "Renumbered into order: ")
+                     + files_word(count), "ok")
 
     def report_sorted(self, moved):
         if not moved:
             return
         total = sum(moved.values())
-        self.log(tr(f"Разнесено по главам: {total} файлов",
-                    f"Split into chapters: {total} files"), "ok")
+        self.log(tr("Разнесено по главам: ", "Split into chapters: ")
+                 + files_word(total), "ok")
         for name in sorted(moved):
             self.log(f"   {name}: {moved[name]}", "ok")
 
@@ -1109,7 +1267,12 @@ class App:
                 if idx:
                     entries.append((idx, 0, single_group, ""))
 
-            order = build_order(entries, order_mode, load_order(dest))
+            old_order = load_order(dest)
+            order = build_order(entries, order_mode,
+                                titles_from_disk(dest, old_order))
+            # files from earlier runs move to their new numbers first, so
+            # new downloads land next to them in the right place
+            self.emit("renumbered", renumber(dest, old_order, order))
             save_order(dest, order)
             seen = set()
             final = []
@@ -1232,6 +1395,8 @@ class App:
                     self.report_organized(payload)
                 elif kind == "sorted":
                     self.report_sorted(payload)
+                elif kind == "renumbered":
+                    self.report_renumbered(payload)
                 elif kind == "take_failed":
                     box, done = payload
                     box.extend(self.failed)

@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import art_downloader as a  # noqa: E402
 
-BY_DATE, BY_GALLERY, BY_NAME = a.ORDER_KEYS
+BY_AUTO, BY_DATE, BY_GALLERY, BY_NAME = a.ORDER_KEYS
 
 
 @pytest.fixture(autouse=True)
@@ -52,13 +52,24 @@ def test_tr_and_labels():
     assert a.browser_label("firefox") == "firefox"
 
 
+def test_files_word():
+    assert [a.files_word(n) for n in (1, 2, 5)] == ["1 file", "2 files", "5 files"]
+    a.set_lang("ru")
+    assert [a.files_word(n) for n in (1, 3, 5, 11, 21, 22, 112)] == [
+        "1 файл", "3 файла", "5 файлов", "11 файлов", "21 файл", "22 файла",
+        "112 файлов"]
+
+
 def test_migrate_old_russian_settings():
     old = {"order": "по названию", "browser": "не брать из браузера", "threads": 4}
     new = a.migrate_config(old)
     assert new["order"] == "name"
     assert new["browser"] == "none"
     assert new["threads"] == 4
-    assert a.migrate_config({}) == {"order": "date", "browser": "firefox"}
+    assert a.migrate_config({})["order"] == "auto"
+    # the old default "date" becomes "auto" once; a later choice is kept
+    assert a.migrate_config({"order": "date"})["order"] == "auto"
+    assert a.migrate_config({"order": "date", "settings_version": 2})["order"] == "date"
 
 
 def test_classify_url():
@@ -101,25 +112,79 @@ def test_parse_collect_line():
     assert a.parse_collect_line("[deviantart][info] something") is None
 
 
+def positions(order):
+    return {idx: v[1] for idx, v in order.items()}
+
+
 def test_build_order_modes():
-    entries = [  # порядок, как отдал сайт (новые первыми)
+    entries = [  # as the site returned them (newest first)
         ("3", 30, "G", "Part 10"),
         ("2", 20, "G", "Part 9"),
         ("1", 10, "G", "Part 2"),
     ]
-    assert a.build_order(entries, BY_DATE) == {
-        "1": ["G", 1], "2": ["G", 2], "3": ["G", 3]}
-    assert a.build_order(entries, BY_GALLERY) == {
-        "3": ["G", 1], "2": ["G", 2], "1": ["G", 3]}
-    assert a.build_order(entries, BY_NAME) == {
-        "1": ["G", 1], "2": ["G", 2], "3": ["G", 3]}
+    assert positions(a.build_order(entries, BY_DATE)) == {"1": 1, "2": 2, "3": 3}
+    assert positions(a.build_order(entries, BY_GALLERY)) == {"3": 1, "2": 2, "1": 3}
+    assert positions(a.build_order(entries, BY_NAME)) == {"1": 1, "2": 2, "3": 3}
 
 
-def test_build_order_keeps_old_numbers():
-    old = {"1": ["G", 1], "2": ["G", 2]}
-    new = a.build_order(
-        [("1", 1, "G", ""), ("2", 2, "G", ""), ("9", 9, "G", "")], BY_DATE, old)
-    assert new == {"1": ["G", 1], "2": ["G", 2], "9": ["G", 3]}
+def test_auto_mode_uses_title_numbers_for_comics():
+    # parts published out of order, like "A Special Tea"
+    entries = [("a", 100, "Tea", " A Special Tea - 19"),
+               ("b", 101, "Tea", " A Special Tea - 20"),
+               ("c", 50, "Tea", " A Special Tea - 64"),
+               ("d", 300, "Tea", " A Special Tea - 21")]
+    order = a.build_order(entries, BY_AUTO)
+    assert positions(order) == {"a": 1, "b": 2, "d": 3, "c": 4}
+    assert order["a"][3] == "A Special Tea - 19"          # spaces tidied
+
+
+def test_auto_mode_falls_back_to_date_without_numbers():
+    entries = [("x", 2, "G", "Sunset"), ("y", 1, "G", "Morning"),
+               ("z", 3, "G", "Night")]
+    assert positions(a.build_order(entries, BY_AUTO)) == {"y": 1, "x": 2, "z": 3}
+
+
+def test_new_work_is_inserted_in_the_middle():
+    old = a.build_order([("p1", 1, "G", "Part 1"), ("p3", 3, "G", "Part 3")], BY_AUTO)
+    new = a.build_order([("p2", 9, "G", "Part 2")], BY_AUTO, old)
+    assert positions(new) == {"p1": 1, "p2": 2, "p3": 3}
+
+
+def test_reorder_renames_existing_files(tmp_path):
+    """The user's case: downloaded by date, then re-sorted by title number."""
+    tea = tmp_path / "Tea"
+    tea.mkdir()
+    # old-format .order.json (no titles) and files numbered by date
+    old = {"i19": ["Tea", 1], "i20": ["Tea", 2], "i64": ["Tea", 3],
+           "i65": ["Tea", 4], "i21": ["Tea", 5]}
+    a.save_order(tmp_path, old)
+    for name in ["001 -  A Special Tea - 19.jpg", "002 -  A Special Tea - 20.jpg",
+                 "003 -  A Special Tea - 64.jpg", "003-02 -  A Special Tea - 64.jpg",
+                 "004 -  A Special Tea - 65.jpg", "005 -  A Special Tea - 21.jpg"]:
+        (tea / name).write_text(name)
+
+    assert a.reorder(tmp_path, BY_AUTO) == 6
+    assert sorted(f.name for f in tea.iterdir()) == [
+        "001 - A Special Tea - 19.jpg", "002 - A Special Tea - 20.jpg",
+        "003 - A Special Tea - 21.jpg", "004 - A Special Tea - 64.jpg",
+        "004-02 - A Special Tea - 64.jpg", "005 - A Special Tea - 65.jpg"]
+    # content followed its file
+    assert (tea / "004-02 - A Special Tea - 64.jpg").read_text().startswith("003-02")
+    saved = a.load_order(tmp_path)
+    assert saved["i21"][1] == 3 and saved["i64"][1] == 4
+    assert a.reorder(tmp_path, BY_AUTO) == 0             # already in order
+
+
+def test_renumber_inside_chapter_folders(tmp_path):
+    g = tmp_path / "Series"
+    (g / "Chapter 01").mkdir(parents=True)
+    (g / "Chapter 01" / "002 - X - Chapter 1 - Part 1.png").touch()
+    (g / "Chapter 01" / "001 - X - Chapter 1 - Part 2.png").touch()
+    a.save_order(tmp_path, {"p2": ["Series", 1, 0, "X - Chapter 1 - Part 2", 0],
+                            "p1": ["Series", 2, 0, "X - Chapter 1 - Part 1", 1]})
+    a.reorder(tmp_path, BY_NAME)
+    assert sorted(f.name for f in (g / "Chapter 01").iterdir()) == [
+        "001 - X - Chapter 1 - Part 1.png", "002 - X - Chapter 1 - Part 2.png"]
 
 
 def test_organize_numbers_and_multi_images(tmp_path):
@@ -128,7 +193,7 @@ def test_organize_numbers_and_multi_images(tmp_path):
     for name in ["da1_01_Part 1.png", "da2_01_Part 2.png", "da2_02_Part 2.png",
                  "da7_01_Unknown.jpg", "pixiv_55.jpg", "da1_01_half.png.part"]:
         (inc / name).touch()
-    order = {"1": ["Ch 1", 1], "2": ["Ch 1", 2]}
+    order = {"1": ["Ch 1", 1], "2": ["Ch 1", 2, 0, "Part 2", 1]}
     moved = a.organize(tmp_path, order)
     names = sorted(p.name for p in (tmp_path / "Ch 1").iterdir())
     assert names == ["001 - Part 1.png", "002 - Part 2.png", "002-02 - Part 2.png"]

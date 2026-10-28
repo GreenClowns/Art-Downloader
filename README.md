@@ -12,7 +12,7 @@ A simple desktop app for **Windows and Linux** for downloading art and comics fr
 
 - **Download everything at once**: a folder, chapter, whole series, gallery, profile or a single work — just paste the link.
 - **Every image inside a work**: if a DeviantArt post has several images, you get all of them, not just the first one.
-- **In order**: each gallery folder on the site gets its own folder on your computer, and files are numbered `001`, `002`, … Order by publication date, gallery order or title (`Part 2` before `Part 10`).
+- **In order**: each gallery folder on the site gets its own folder on your computer, and files are numbered `001`, `002`, … By default the order is **automatic**: by the number in the title when the works have one (`Part 2` before `Part 10`, even if the artist posted them out of order), otherwise by publication date. You can also pick date, gallery order or title.
 - **18+ works**: the “Connect DeviantArt” button gives the app access on behalf of your account, once (DeviantArt's official sign-in for apps). The app never stores your password.
 - **Fast**: parallel downloads.
 - **Reliable**: retries failed files automatically, resumes after Stop, never downloads the same file twice.
@@ -78,6 +78,9 @@ If a download gets interrupted, just click “Download” again: the app fetches
 
 **`403 Forbidden` errors on 18+ works.**
 Click “Connect DeviantArt” and download again. Without it, DeviantArt only gives apps a blurred version.
+
+**Files are numbered out of order.**
+The artist probably posted the parts out of order and the folder was numbered by publication date. Choose **Numbering order → automatic** (or **by title**) and click **Organize files**: everything already downloaded is renumbered, nothing is downloaded again.
 
 **Some works still didn't download.**
 Usually that's paid content (subscriptions, Premium Gallery). You can only download it if you have access to it on the site. The app lists these files at the end of the log.
