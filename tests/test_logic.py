@@ -385,3 +385,81 @@ def test_renumber_moves_files_to_their_new_folder(tmp_path):
 def test_progress_lines_are_recognized():
     assert a.PROGRESS_RE.match("[3/10] https://www.deviantart.com/view/1")
     assert not a.PROGRESS_RE.match("[download][error] Failed to download x")
+
+
+# ------------------------------------- notifications, export, updates
+
+def test_notify_commands():
+    argv, env = a.notify_command("T", 'say "hi"', platform="mac")
+    assert argv[0] == "osascript" and '\\"hi\\"' in argv[2]
+    argv, env = a.notify_command("Title", "<b>&", platform="windows")
+    assert argv[0] == "powershell" and env == {"ARTDL_TITLE": "Title", "ARTDL_BODY": "<b>&"}
+    assert "<b>&" not in " ".join(argv)            # text never inside the script
+    linux = a.notify_command("T", "-rf body", platform="linux")
+    if linux:                                       # only if notify-send exists
+        assert linux[0][-3:] == ["--", "T", "-rf body"]
+
+
+def test_versions():
+    assert a.parse_version("v1.32.18") == (1, 32, 18)
+    assert a.is_newer("1.33.0", "1.32.18") and not a.is_newer("v1.0.0", "1.0.0")
+    assert a.is_newer("1.10.0", "1.9.9")
+    assert a.parse_version("garbage") == ()
+
+
+def test_update_methods():
+    venv = [sys.executable, "-m", "gallery_dl"]
+    assert a.update_method(venv, frozen=True) == "app"
+    assert a.update_method(venv, frozen=False, in_venv=True) == "pip"
+    assert a.update_command("pip")[-2:] == ["--upgrade", "gallery-dl"]
+    pipx_path = [str(Path.home() / ".local" / "bin" / "gallery-dl")]
+    assert a.update_method(pipx_path, frozen=False, in_venv=False, pipx="/usr/bin/pipx") == "pipx"
+    assert a.update_method(["/usr/bin/gallery-dl"], frozen=False, in_venv=False,
+                           pipx=None) == "manual"
+    assert a.update_command("manual") is None
+
+
+def _pages(folder, names, fmt="PNG"):
+    from PIL import Image
+    folder.mkdir(parents=True, exist_ok=True)
+    for n in names:
+        Image.new("RGB", (40, 60), (200, 30, 30)).save(folder / n, fmt)
+
+
+def test_export_plan_and_books(tmp_path):
+    import zipfile
+    _pages(tmp_path / "Tea", ["010 - Tea - 10.png", "002 - Tea - 2.png"])
+    _pages(tmp_path / "Mei" / "Chapter 02", ["003 - Mei 2 - Page 1.png"])
+    _pages(tmp_path / "Mei" / "Chapter 01", ["001 - Mei 1 Cover.png",
+                                             "002 - Mei 1 - Page 1.jpg"], "JPEG")
+    (tmp_path / "Mei" / "notes.txt").write_text("x")
+    plan = a.export_plan(tmp_path)
+    assert [(n, [p.name for p in ps]) for n, ps in plan] == [
+        ("Mei - Chapter 01", ["001 - Mei 1 Cover.png", "002 - Mei 1 - Page 1.jpg"]),
+        ("Mei - Chapter 02", ["003 - Mei 2 - Page 1.png"]),
+        ("Tea", ["002 - Tea - 2.png", "010 - Tea - 10.png"])]
+    made = a.export_books(tmp_path, "cbz")
+    assert [m.name for m in made] == ["Mei - Chapter 01.cbz", "Mei - Chapter 02.cbz", "Tea.cbz"]
+    with zipfile.ZipFile(made[2]) as z:
+        assert z.namelist() == ["001.png", "002.png", "ComicInfo.xml"]
+        assert z.read("002.png") == (tmp_path / "Tea" / "010 - Tea - 10.png").read_bytes()
+    pdf = a.export_books(tmp_path, "pdf")[0].read_bytes()
+    assert pdf.startswith(b"%PDF-1.4") and pdf.rstrip().endswith(b"%%EOF")
+    assert pdf.count(b"/Type /Page ") == 2
+    jpg = (tmp_path / "Mei" / "Chapter 01" / "002 - Mei 1 - Page 1.jpg").read_bytes()
+    assert jpg in pdf                               # JPEG copied without loss
+    # the export folder is never treated as a gallery
+    assert a.sort_all_chapters(tmp_path) == {}
+    assert [n for n, _ in a.export_plan(tmp_path)][-1] == "Tea"
+    assert a.safe_name("_Export") == "_Export_"
+
+
+def test_latest_app_release(monkeypatch):
+    monkeypatch.setattr(a, "fetch_json", lambda url, timeout=10: {
+        "tag_name": "v1.1.0", "html_url": "https://github.com/x/releases/tag/v1.1.0"})
+    assert a.latest_app_release() == ("v1.1.0", "https://github.com/x/releases/tag/v1.1.0")
+
+    def offline(url, timeout=10):
+        raise OSError("no network")
+    monkeypatch.setattr(a, "fetch_json", offline)
+    assert a.latest_app_release() is None

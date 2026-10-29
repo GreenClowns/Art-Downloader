@@ -55,6 +55,20 @@ jobs:
           }
           "value=$v" >> $env:GITHUB_OUTPUT
 
+      - name: Put the version into the app
+        env:
+          APP_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          $code = @'
+          import os, re, pathlib
+          p = pathlib.Path("art_downloader.py")
+          v = os.environ["APP_VERSION"]
+          s, n = re.subn(r'^APP_VERSION = "[^"]*"', f'APP_VERSION = "{v}"', p.read_text(encoding="utf-8"), flags=re.M)
+          assert n == 1
+          p.write_text(s, encoding="utf-8")
+          '@
+          python -c $code
+
       - name: Build exe (PyInstaller)
         run: >
           pyinstaller --noconfirm --clean --windowed

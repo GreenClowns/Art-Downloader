@@ -20,6 +20,7 @@ If you type a password, it is passed to gallery-dl through a temporary file that
 - Folder names coming from websites are cleaned so they can never point outside your download folder; a damaged or edited `.order.json` can't make the app write elsewhere.
 - Never overwrites a different file; a name clash gets “ (2)”.
 - Warns if a download could run code (`.exe`, `.bat`, `.sh`, …).
+- Network: besides the sites you download from, the app only contacts `pypi.org` and `api.github.com` once a day to check for updates (no personal data is sent). Turn it off in Settings → Notifications and updates.
 - Library versions are pinned and checked with `pip-audit`; Dependabot proposes updates. GitHub Actions are pinned to exact commits and the build runs with read-only access.
 
 ## Known limitations
@@ -53,6 +54,7 @@ Please open an issue, or use **Security → Report a vulnerability** on GitHub i
 - Названия папок с сайтов очищаются и не могут указать за пределы папки загрузки; испорченный или изменённый `.order.json` не заставит программу писать в другое место.
 - Никогда не перезаписывает другой файл: при совпадении имени добавляется « (2)».
 - Предупреждает, если скачанный файл может запускать программы (`.exe`, `.bat`, `.sh`, …).
+- Сеть: кроме сайтов, с которых ты качаешь, программа раз в день обращается только к `pypi.org` и `api.github.com`, чтобы проверить обновления (личные данные не передаются). Отключается в Настройки → Уведомления и обновления.
 - Версии библиотек закреплены и проверены `pip-audit`; Dependabot предлагает обновления. Действия GitHub Actions закреплены по точным коммитам, сборка работает только с правами чтения.
 
 ## Известные ограничения

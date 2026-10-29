@@ -19,6 +19,9 @@ A simple desktop app for **Windows and Linux** for downloading art and comics fr
 - **Fast**: parallel downloads.
 - **Reliable**: retries failed files automatically, resumes after Stop, never downloads the same file twice.
 - **Chapters**: if one folder mixes several chapters, it can split them into `Chapter 01`, `Chapter 02`, …
+- **Read anywhere**: **To CBZ / PDF…** makes one book per chapter — CBZ keeps the original images, PDF opens on any device.
+- **Notifications**: a desktop notification when a download finishes while the window is in the background.
+- **Stays working**: checks for updates once a day; on Linux, gallery-dl updates with one click in Settings (DeviantArt changes break old versions).
 - **Clean, modern look**: light and dark themes (follows your system by default), one big Download/Stop button, everything else tucked away in **Settings**.
 - **Two languages**: English and Russian (Settings → Appearance). Defaults to your system language.
 

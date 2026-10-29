@@ -28,6 +28,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox
@@ -299,7 +300,7 @@ def safe_name(name, windows=WINDOWS):
     """
     bad = r'[<>:"/\\|?*\x00-\x1f]' if windows else r'[/\\\x00-\x1f]'
     name = re.sub(bad, "-", name or "").strip(" .")[:120].strip(" .")
-    if name.split(".")[0].upper() in WINDOWS_RESERVED:
+    if name.split(".")[0].upper() in WINDOWS_RESERVED or name == "_Export":
         name += "_"
     return name or tr("Без названия", "Untitled")
 
@@ -726,6 +727,7 @@ def sort_all_chapters(dest):
     result = {}
     folders = [dest] + [d for d in sorted(dest.iterdir())
                         if d.is_dir() and not d.name.startswith(".")
+                        and d.name != "_Export"
                         and not CHAPTER_DIR_RE.match(d.name)]
     for folder in folders:
         for ch, n in sort_into_chapters(folder).items():
@@ -787,6 +789,308 @@ def pretty_name(path):
     name = os.path.basename(path.strip())
     return re.sub(r"^da\d+_\d+_", "", name)
 
+
+# --------------------------------------------------------------------------
+# Notifications, export to CBZ/PDF, updates
+# --------------------------------------------------------------------------
+
+def notify_command(title, body, platform=None, icon=None):
+    """
+    How to show a desktop notification on this system:
+    (argv, extra environment) or None if there is no way.
+    Text goes through the environment on Windows so it can't break the script.
+    """
+    platform = platform or ("windows" if WINDOWS else
+                            "mac" if sys.platform == "darwin" else "linux")
+    if platform == "linux":
+        if not shutil.which("notify-send"):
+            return None
+        argv = ["notify-send", "--app-name=" + APP_TITLE]
+        if icon:
+            argv.append(f"--icon={icon}")
+        return argv + ["--", title, body], {}
+    if platform == "mac":
+        quote = lambda s: '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        return ["osascript", "-e",
+                f"display notification {quote(body)} with title {quote(title)}"], {}
+    if platform == "windows":
+        return (["powershell", "-NoProfile", "-NonInteractive",
+                 "-ExecutionPolicy", "Bypass", "-Command", WINDOWS_TOAST],
+                {"ARTDL_TITLE": title, "ARTDL_BODY": body})
+    return None
+
+
+WINDOWS_TOAST = r"""
+$ErrorActionPreference = 'Stop'
+[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
+[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null
+$t = [Security.SecurityElement]::Escape($env:ARTDL_TITLE)
+$b = [Security.SecurityElement]::Escape($env:ARTDL_BODY)
+$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+$xml.LoadXml("<toast><visual><binding template='ToastGeneric'><text>$t</text><text>$b</text></binding></visual></toast>")
+$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+$app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app).Show($toast)
+"""
+
+
+def send_notification(title, body):
+    """Shows a desktop notification; never raises."""
+    icon = resource_path("icon.png")
+    cmd = notify_command(title, body, icon=str(icon) if icon else None)
+    if not cmd:
+        return False
+    argv, extra = cmd
+    try:
+        subprocess.Popen(argv, env=dict(os.environ, **extra),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL,
+                         creationflags=CREATE_NO_WINDOW if WINDOWS else 0)
+        return True
+    except OSError:
+        return False
+
+
+def flash_taskbar(root):
+    """Makes the taskbar button blink on Windows until the window is focused."""
+    if not WINDOWS:
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class FLASHWINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.UINT), ("hwnd", wintypes.HWND),
+                        ("dwFlags", wintypes.DWORD), ("uCount", wintypes.UINT),
+                        ("dwTimeout", wintypes.DWORD)]
+
+        info = FLASHWINFO(ctypes.sizeof(FLASHWINFO), int(root.wm_frame(), 16),
+                          0x0F, 0, 0)    # FLASHW_ALL | FLASHW_TIMERNOFG
+        ctypes.windll.user32.FlashWindowEx(ctypes.byref(info))
+    except Exception:
+        pass
+
+
+EXPORT_DIR = "_Export"
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+
+
+def export_plan(dest):
+    """
+    Books to make from a download folder: one per Chapter NN folder, or one
+    per gallery folder when it isn't split. Pages in file-name order, which
+    is the reading order. Returns [(book name, [page paths]), …].
+    """
+    dest = Path(dest)
+    images = lambda d: sorted((p for p in d.iterdir()
+                               if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS),
+                              key=lambda p: natural_key(p.name))
+    books = []
+    if not dest.is_dir():
+        return books
+    for group in sorted((d for d in dest.iterdir() if d.is_dir()),
+                        key=lambda d: natural_key(d.name)):
+        if group.name.startswith(".") or group.name == EXPORT_DIR:
+            continue
+        chapters = sorted((d for d in group.iterdir()
+                           if d.is_dir() and CHAPTER_DIR_RE.match(d.name)),
+                          key=lambda d: natural_key(d.name))
+        loose = images(group)
+        if loose:
+            books.append((group.name, loose))
+        for ch in chapters:
+            pages = images(ch)
+            if pages:
+                books.append((f"{group.name} - {ch.name}", pages))
+    return books
+
+
+def _xml(text):
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def write_cbz(path, pages, series, title):
+    """Comic book archive: the original images, no quality loss."""
+    import zipfile
+    width = max(3, len(str(len(pages))))
+    info = ('<?xml version="1.0" encoding="utf-8"?>\n<ComicInfo>'
+            f"<Series>{_xml(series)}</Series><Title>{_xml(title)}</Title>"
+            f"<PageCount>{len(pages)}</PageCount></ComicInfo>\n")
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as z:
+        for i, page in enumerate(pages, 1):
+            z.write(page, f"{i:0{width}d}{page.suffix.lower()}")
+        z.writestr("ComicInfo.xml", info)
+
+
+def _jpeg_page(page):
+    """(jpeg bytes, width, height, colour space) for one page."""
+    import io
+    from PIL import Image
+    with Image.open(page) as im:
+        if im.format == "JPEG" and im.mode in ("RGB", "L"):
+            data = Path(page).read_bytes()          # embed as is, no loss
+            return data, im.width, im.height, "DeviceGray" if im.mode == "L" else "DeviceRGB"
+        im.seek(0)
+        if im.mode in ("RGBA", "LA", "P"):
+            rgba = im.convert("RGBA")
+            rgb = Image.new("RGB", rgba.size, (255, 255, 255))
+            rgb.paste(rgba, mask=rgba.getchannel("A"))
+        else:
+            rgb = im.convert("RGB")
+        buf = io.BytesIO()
+        rgb.save(buf, "JPEG", quality=92, optimize=True)
+        return buf.getvalue(), rgb.width, rgb.height, "DeviceRGB"
+
+
+def write_pdf(path, pages, title):
+    """
+    PDF with one image per page. Pages are processed one at a time, so even
+    huge chapters need little memory; JPEG pages are copied without loss.
+    """
+    offsets, n_pages = [], len(pages)
+    page_ids = [3 + 3 * i for i in range(n_pages)]
+    with open(path, "wb") as f:
+        def obj(num, body, stream=None):
+            offsets.append((num, f.tell()))
+            f.write(f"{num} 0 obj\n".encode())
+            f.write(body.encode("latin-1") if isinstance(body, str) else body)
+            if stream is not None:
+                f.write(b"\nstream\n" + stream + b"\nendstream")
+            f.write(b"\nendobj\n")
+
+        f.write(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+        obj(1, "<< /Type /Catalog /Pages 2 0 R >>")
+        kids = " ".join(f"{p} 0 R" for p in page_ids)
+        obj(2, f"<< /Type /Pages /Kids [{kids}] /Count {n_pages} >>")
+        for i, page in enumerate(pages):
+            data, w, h, space = _jpeg_page(page)
+            pw, ph = w * 0.75, h * 0.75                 # 96 dpi → points
+            pid, img, content = page_ids[i], page_ids[i] + 1, page_ids[i] + 2
+            obj(pid, f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {pw:.2f} {ph:.2f}] "
+                     f"/Resources << /XObject << /Im0 {img} 0 R >> >> "
+                     f"/Contents {content} 0 R >>")
+            obj(img, f"<< /Type /XObject /Subtype /Image /Width {w} /Height {h} "
+                     f"/ColorSpace /{space} /BitsPerComponent 8 "
+                     f"/Filter /DCTDecode /Length {len(data)} >>", data)
+            draw = f"q {pw:.2f} 0 0 {ph:.2f} 0 0 cm /Im0 Do Q".encode()
+            obj(content, f"<< /Length {len(draw)} >>", draw)
+        info_id = 3 + 3 * n_pages
+        safe_title = "".join(c for c in title if c.isascii() and c.isprintable())
+        safe_title = safe_title.replace("\\", "").replace("(", "").replace(")", "")
+        obj(info_id, f"<< /Title ({safe_title}) /Producer ({APP_TITLE}) >>")
+        xref = f.tell()
+        total = info_id + 1
+        table = {num: off for num, off in offsets}
+        f.write(f"xref\n0 {total}\n0000000000 65535 f \n".encode())
+        for num in range(1, total):
+            f.write(f"{table[num]:010d} 00000 n \n".encode())
+        f.write(f"trailer\n<< /Size {total} /Root 1 0 R /Info {info_id} 0 R >>\n"
+                f"startxref\n{xref}\n%%EOF\n".encode())
+
+
+def export_books(dest, fmt, on_book=None):
+    """
+    Makes CBZ or PDF books from a download folder into dest/_Export.
+    on_book(index, total, name) is called before each book.
+    Returns the paths created.
+    """
+    dest = Path(dest)
+    out_dir = dest / EXPORT_DIR
+    plan = export_plan(dest)
+    made = []
+    for i, (name, pages) in enumerate(plan, 1):
+        if on_book:
+            on_book(i, len(plan), name)
+        out_dir.mkdir(exist_ok=True)
+        target = out_dir / f"{safe_name(name)}.{fmt}"
+        tmp = target.with_name(f".{target.name}.tmp")
+        series = name.split(" - Chapter ")[0]
+        if fmt == "cbz":
+            write_cbz(tmp, pages, series, name)
+        else:
+            write_pdf(tmp, pages, name)
+        tmp.replace(target)          # replaces an older export of the same book
+        made.append(target)
+    return made
+
+
+APP_VERSION = "1.0.0"                       # set from the release tag at build
+REPO = "GreenClowns/Art-Downloader"
+RELEASES_URL = f"https://github.com/{REPO}/releases/latest"
+
+
+def parse_version(text):
+    """'v1.32.18' → (1, 32, 18); anything odd → ()."""
+    m = re.match(r"^\D*(\d+(?:\.\d+)*)", (text or "").strip())
+    return tuple(int(x) for x in m.group(1).split(".")) if m else ()
+
+
+def is_newer(candidate, current):
+    return parse_version(candidate) > parse_version(current)
+
+
+def fetch_json(url, timeout=10):
+    import urllib.request
+    req = urllib.request.Request(url, headers={
+        "User-Agent": f"{APP_TITLE}/{APP_VERSION}",
+        "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 (fixed https URLs)
+        return json.loads(r.read().decode("utf-8"))
+
+
+def latest_gallery_dl():
+    return fetch_json("https://pypi.org/pypi/gallery-dl/json")["info"]["version"]
+
+
+def latest_app_release():
+    """(version, page url) of the newest published release, or None."""
+    try:
+        data = fetch_json(f"https://api.github.com/repos/{REPO}/releases/latest")
+    except Exception:
+        return None
+    return data.get("tag_name", ""), data.get("html_url") or RELEASES_URL
+
+
+def gallery_dl_version(gdl):
+    if not gdl:
+        return None
+    try:
+        out = subprocess.run(list(gdl) + ["--version"], capture_output=True,
+                             text=True, timeout=60, stdin=subprocess.DEVNULL,
+                             creationflags=CREATE_NO_WINDOW if WINDOWS else 0)
+        return out.stdout.strip().splitlines()[0] if out.stdout.strip() else None
+    except (OSError, subprocess.SubprocessError, IndexError):
+        return None
+
+
+def update_method(gdl, frozen=None, in_venv=None, pipx=None):
+    """
+    How gallery-dl can be updated here:
+      'app'    — it's built into the .exe: update the whole app
+      'pip'    — the app's own Python environment (Linux install)
+      'pipx'   — installed with pipx
+      'manual' — somewhere else; tell the user
+    """
+    frozen = FROZEN if frozen is None else frozen
+    in_venv = (sys.prefix != sys.base_prefix) if in_venv is None else in_venv
+    pipx = shutil.which("pipx") if pipx is None else pipx
+    if frozen:
+        return "app"
+    if gdl and gdl[:3] == [sys.executable, "-m", "gallery_dl"] and in_venv:
+        return "pip"
+    if gdl and pipx and Path(gdl[0]).name.startswith("gallery-dl") \
+            and ".local" in Path(gdl[0]).parts:
+        return "pipx"
+    return "manual"
+
+
+def update_command(method):
+    if method == "pip":
+        return [sys.executable, "-m", "pip", "install", "--upgrade", "gallery-dl"]
+    if method == "pipx":
+        return ["pipx", "upgrade", "gallery-dl"]
+    return None
 
 # --------------------------------------------------------------------------
 # Window
@@ -888,6 +1192,12 @@ class App:
         self.var_threads = tk.StringVar(value=str(cfg.get("threads", 3)))
         self.var_sort = tk.BooleanVar(value=cfg.get("sort", True))
         self.var_retry = tk.BooleanVar(value=cfg.get("retry", True))
+        self.var_notify = tk.BooleanVar(value=cfg.get("notify", True))
+        self.var_autoupdate = tk.BooleanVar(value=cfg.get("auto_update", True))
+        self.last_update_check = float(cfg.get("last_update_check", 0) or 0)
+        self.update_action = None          # what the update button does
+        self.var_versions = tk.StringVar(value=f"{APP_TITLE} {APP_VERSION}")
+        self.var_update = tk.StringVar(value="")
         self.da_connected = bool(cfg.get("da_connected", False))
         self.var_connected = tk.StringVar()
         self.var_status = tk.StringVar()
@@ -901,6 +1211,7 @@ class App:
         self.check_gallery_dl()
         self.root.after(100, self.poll_events)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.root.after(2500, self.auto_check_updates)
 
     # ---------- interface ----------
 
@@ -929,17 +1240,18 @@ class App:
         frame.pack(fill="x", **({"pady": (0, 12)} | pack))
         return frame
 
-    def heading(self, parent, text, hint=None):
+    def heading(self, parent, text, hint=None, wrap=760):
         ctk.CTkLabel(parent, text=text, font=self.font(15, "bold"),
                      anchor="w").pack(fill="x", padx=16, pady=(14, 0))
         if hint:
             ctk.CTkLabel(parent, text=hint, font=self.font(12),
                          text_color=MUTED, anchor="w", justify="left",
-                         wraplength=760).pack(fill="x", padx=16, pady=(2, 0))
+                         wraplength=wrap).pack(fill="x", padx=16, pady=(2, 0))
 
     def build_ui(self):
         # forget widgets of a previous build (language change rebuilds all)
         self.btn_connect = self.btn_da_status = self.cmb_lang = None
+        self.btn_export = self.btn_check = self.btn_update = None
         # Header: logo, title, DeviantArt status
         header = ctk.CTkFrame(self.root, fg_color="transparent")
         header.pack(fill="x", padx=20, pady=(16, 4))
@@ -1036,6 +1348,10 @@ class App:
         ctk.CTkButton(status, text=tr("Упорядочить файлы", "Organize files"),
                       width=140, command=self.organize_now, **small).pack(
             side="right", padx=(0, 8))
+        self.btn_export = ctk.CTkButton(
+            status, text=tr("В CBZ / PDF…", "To CBZ / PDF…"), width=110,
+            command=self.open_export, **small)
+        self.btn_export.pack(side="right", padx=(0, 8))
 
         # Log
         self.txt_log = ctk.CTkTextbox(tab, height=150, wrap="none",
@@ -1140,6 +1456,36 @@ class App:
                                        self.theme_key, command=self.change_theme)
         self.seg_theme.widget.pack(side="left")
 
+        # Notifications and updates
+        upd = self.card(scroll)
+        self.heading(upd, tr("Уведомления и обновления", "Notifications and updates"))
+        ctk.CTkSwitch(upd, variable=self.var_notify, progress_color=ACCENT,
+                      text=tr("Уведомлять, когда скачивание закончится (если окно "
+                              "в фоне)",
+                              "Notify me when a download finishes (if the window "
+                              "is in the background)"),
+                      command=self.save_config).pack(anchor="w", padx=16, pady=(8, 4))
+        ctk.CTkSwitch(upd, variable=self.var_autoupdate, progress_color=ACCENT,
+                      text=tr("Проверять обновления раз в день",
+                              "Check for updates once a day"),
+                      command=self.save_config).pack(anchor="w", padx=16, pady=(0, 10))
+        ctk.CTkLabel(upd, textvariable=self.var_versions, font=self.font(12),
+                     text_color=MUTED, anchor="w").pack(fill="x", padx=16)
+        row = ctk.CTkFrame(upd, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(6, 4))
+        self.btn_check = ctk.CTkButton(
+            row, text=tr("Проверить обновления", "Check for updates"), height=34,
+            fg_color=WINDOW_BG, text_color=("#111827", "#f3f4f6"),
+            hover_color=("#e5e7eb", "#2a2c30"), command=self.check_updates)
+        self.btn_check.pack(side="left")
+        self.btn_update = ctk.CTkButton(row, text="", height=34, fg_color=ACCENT,
+                                        hover_color=ACCENT_HOVER,
+                                        command=self.do_update)
+        ctk.CTkLabel(upd, textvariable=self.var_update, font=self.font(12),
+                     text_color=MUTED, anchor="w", justify="left",
+                     wraplength=760).pack(fill="x", padx=16, pady=(0, 16))
+        self.show_update_button()
+
     def update_dest(self):
         if hasattr(self, "var_dest"):
             self.var_dest.set(tr("Сохранится в: ", "Will be saved to: ")
@@ -1221,6 +1567,9 @@ class App:
                 "retry": self.var_retry.get(),
                 "sort": self.var_sort.get(),
                 "da_connected": self.da_connected,
+                "notify": self.var_notify.get(),
+                "auto_update": self.var_autoupdate.get(),
+                "last_update_check": self.last_update_check,
             }, ensure_ascii=False, indent=2), encoding="utf-8")
         except OSError:
             pass
@@ -1259,6 +1608,10 @@ class App:
 
     def check_gallery_dl(self):
         self.gdl = find_gallery_dl()
+        if self.gdl:
+            gdl = self.gdl
+            threading.Thread(target=lambda: self.emit(
+                "gdl_version", gallery_dl_version(gdl)), daemon=True).start()
         if FROZEN:
             self.log(tr("gallery-dl встроен в программу",
                         "gallery-dl is built into the app"), "info")
@@ -1325,7 +1678,10 @@ class App:
             self.progress.set(0)
         state = "disabled" if running else "normal"
         for widget in (self.btn_connect, self.btn_da_status,
-                       self.cmb_lang.widget if self.cmb_lang else None):
+                       self.cmb_lang.widget if self.cmb_lang else None,
+                       getattr(self, "btn_export", None),
+                       getattr(self, "btn_check", None),
+                       getattr(self, "btn_update", None)):
             if widget is not None:
                 widget.configure(state=state)
 
@@ -1436,6 +1792,239 @@ class App:
         self.report_renumbered(reorder(folder, self.cmb_order.get()))
         if self.var_sort.get():
             self.report_sorted(sort_all_chapters(folder))
+
+    # ---------- export to CBZ / PDF ----------
+
+    def open_export(self):
+        folder = self.dest_folder()
+        plan = export_plan(folder) if folder.is_dir() else []
+        if not plan:
+            messagebox.showinfo(APP_TITLE, tr(
+                f"В папке пока нет скачанных глав:\n{folder}",
+                f"No downloaded chapters in this folder yet:\n{folder}"))
+            return
+        win = ctk.CTkToplevel(self.root)
+        win.title(tr("Экспорт в CBZ / PDF", "Export to CBZ / PDF"))
+        win.geometry("580x420")
+        win.transient(self.root)
+        win.after(100, win.grab_set)
+        win.configure(fg_color=WINDOW_BG)
+        body = ctk.CTkFrame(win, fg_color=CARD, corner_radius=12)
+        body.pack(fill="both", expand=True, padx=16, pady=16)
+        self.heading(body, tr(f"Книг: {len(plan)}", f"Books: {len(plan)}"), tr(
+            "По одной книге на главу (папку Chapter NN) или на папку. "
+            "Страницы — в том же порядке, что и файлы.",
+            "One book per chapter (Chapter NN folder) or per folder. "
+            "Pages follow the file order."), wrap=500)
+        names = "\n".join("• " + n for n, _ in plan[:6])
+        if len(plan) > 6:
+            names += "\n" + tr(f"…и ещё {len(plan) - 6}", f"…and {len(plan) - 6} more")
+        ctk.CTkLabel(body, text=names, font=self.font(12), anchor="w",
+                     justify="left").pack(fill="x", padx=16, pady=(8, 4))
+        fmt = KeyedSegments(body, ["cbz", "pdf"], lambda k: {
+            "cbz": tr("CBZ — без потерь", "CBZ — lossless"),
+            "pdf": tr("PDF — открывается везде", "PDF — opens anywhere")}[k], "cbz")
+        fmt.widget.pack(anchor="w", padx=16, pady=(8, 8))
+        ctk.CTkLabel(body, text=tr("Сохранится в: ", "Will be saved to: ")
+                     + str(folder / EXPORT_DIR), font=self.font(12),
+                     text_color=MUTED, anchor="w", justify="left",
+                     wraplength=500).pack(fill="x", padx=16)
+
+        def go():
+            win.destroy()
+            self.start_export(folder, fmt.get())
+
+        ctk.CTkButton(body, text=tr("Создать", "Create"), height=38,
+                      fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                      command=go).pack(fill="x", padx=16, pady=(12, 16))
+        # fit the window to its content (CustomTkinter scales sizes itself)
+        win.update_idletasks()
+        try:
+            scale = win._get_window_scaling()
+        except AttributeError:
+            scale = 1.0
+        height = int((body.winfo_reqheight() + 34) / scale)
+        win.geometry(f"580x{height}")
+        win.resizable(False, False)
+
+    def start_export(self, folder, fmt):
+        self.stop_flag.clear()
+        self.set_running(True)
+        self.btn_start.configure(state="disabled")
+        self.log(tr(f"— Экспорт в {fmt.upper()}…", f"— Exporting to {fmt.upper()}…"),
+                 "info")
+
+        def work():
+            try:
+                made = export_books(folder, fmt, lambda i, n, name: self.emit(
+                    "export_progress", (i, n, name)))
+                self.emit("export_done", (True, [str(m) for m in made]))
+            except Exception as e:
+                self.emit("export_done", (False, str(e)))
+
+        self.worker = threading.Thread(target=work, daemon=True)
+        self.worker.start()
+
+    def on_export_progress(self, payload):
+        i, n, name = payload
+        self.var_status.set(tr(f"Экспорт: {i} из {n}", f"Exporting: {i} of {n}"))
+        self.show_progress((i - 1) / n)
+        self.log(f"   {name}", "info")
+
+    def on_export_done(self, payload):
+        ok, result = payload
+        self.set_running(False)
+        self.btn_start.configure(state="normal")
+        if ok:
+            self.var_status.set(tr(f"Готово: книг {len(result)}",
+                                   f"Done: {len(result)} books"))
+            self.log(tr(f"— Готово! Книги в папке {EXPORT_DIR}.",
+                        f"— Done! The books are in the {EXPORT_DIR} folder."), "ok")
+            self.notify_finished(True, tr(f"Экспорт готов: книг {len(result)}.",
+                                          f"Export finished: {len(result)} books."))
+        else:
+            self.var_status.set(tr("Ошибка экспорта — смотри журнал",
+                                   "Export failed — see the log"))
+            self.log(tr(f"Не удалось сделать книгу: {result}",
+                        f"Could not make a book: {result}"), "err")
+
+    # ---------- updates ----------
+
+    def auto_check_updates(self):
+        if (self.var_autoupdate.get() and not self.running
+                and time.time() - self.last_update_check > 24 * 3600):
+            self.check_updates(quiet=True)
+
+    def check_updates(self, quiet=False):
+        if getattr(self, "_checking", False):
+            return
+        self._checking = True
+        if not quiet:
+            self.var_update.set(tr("Проверяю…", "Checking…"))
+        gdl = self.gdl
+
+        def work():
+            info = {"quiet": quiet, "current_gdl": gallery_dl_version(gdl),
+                    "method": update_method(gdl)}
+            try:
+                info["latest_gdl"] = latest_gallery_dl()
+            except Exception as e:
+                info["error"] = str(e)
+            info["app"] = latest_app_release()
+            self.emit("updates", info)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_updates(self, info):
+        self._checking = False
+        self.last_update_check = time.time()
+        self.save_config()
+        cur, latest, method = info["current_gdl"], info.get("latest_gdl"), info["method"]
+        self.var_versions.set(f"{APP_TITLE} {APP_VERSION} · gallery-dl {cur or '?'}")
+        app = info.get("app")
+        new_app = app if app and is_newer(app[0], APP_VERSION) else None
+        new_gdl = latest if latest and cur and is_newer(latest, cur) else None
+        lines, self.update_action = [], None
+        if new_app:
+            lines.append(tr(f"Вышла новая версия Art Downloader: {app[0]}.",
+                            f"A new Art Downloader version is out: {app[0]}."))
+            self.update_action = ("app", app[1])
+        if new_gdl:
+            if method in ("pip", "pipx"):
+                lines.append(tr(f"Доступен gallery-dl {latest} (сейчас {cur}).",
+                                f"gallery-dl {latest} is available (you have {cur})."))
+                self.update_action = self.update_action or ("gdl", latest)
+            elif method == "app":
+                lines.append(tr(f"Вышел gallery-dl {latest}. Он придёт с новой "
+                                "версией программы.",
+                                f"gallery-dl {latest} is out. It will come with "
+                                "the next app version."))
+            else:
+                lines.append(tr(f"Доступен gallery-dl {latest}. Обнови его так же, "
+                                "как устанавливал.",
+                                f"gallery-dl {latest} is available. Update it the "
+                                "way you installed it."))
+        if "error" in info and not lines:
+            lines.append(tr("Не удалось проверить: нет связи с интернетом?",
+                            "Couldn't check: no internet connection?"))
+        if not lines:
+            lines.append(tr("Всё обновлено.", "Everything is up to date."))
+        self.var_update.set(" ".join(lines))
+        self.show_update_button()
+        if self.update_action and info["quiet"]:
+            self.log(tr("Доступно обновление — Настройки → Уведомления и "
+                        "обновления.",
+                        "An update is available — Settings → Notifications and "
+                        "updates."), "info")
+
+    def show_update_button(self):
+        btn = getattr(self, "btn_update", None)
+        if btn is None:
+            return
+        if not self.update_action:
+            btn.pack_forget()
+            return
+        kind, value = self.update_action
+        btn.configure(text=tr(f"Обновить gallery-dl до {value}",
+                              f"Update gallery-dl to {value}") if kind == "gdl"
+                      else tr("Скачать новую версию", "Download the new version"))
+        btn.pack(side="left", padx=(8, 0))
+
+    def do_update(self):
+        if not self.update_action:
+            return
+        kind, value = self.update_action
+        if kind == "app":
+            import webbrowser
+            webbrowser.open(value)
+            return
+        cmd = update_command(update_method(self.gdl))
+        if not cmd:
+            return
+        self.stop_flag.clear()
+        self.set_running(True)
+        self.btn_start.configure(state="disabled")
+        self.var_update.set(tr("Обновляю gallery-dl…", "Updating gallery-dl…"))
+        self.log(tr("— Обновляю gallery-dl…", "— Updating gallery-dl…"), "info")
+
+        def work():
+            code = self.run_process_cmd(cmd)
+            self.emit("update_done", (code == 0, gallery_dl_version(self.gdl)))
+
+        self.worker = threading.Thread(target=work, daemon=True)
+        self.worker.start()
+
+    def run_process_cmd(self, cmd):
+        """Runs any command, its output goes to the log (used for updates)."""
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL, text=True, encoding="utf-8",
+                errors="replace", creationflags=CREATE_NO_WINDOW if WINDOWS else 0)
+            for line in proc.stdout:
+                if line.strip() and not line.startswith(("  ", "Requirement already")):
+                    self.emit("log", (line.rstrip()[:200], "skip"))
+            return proc.wait()
+        except OSError as e:
+            self.emit("log", (str(e), "err"))
+            return 1
+
+    def on_update_done(self, payload):
+        ok, version = payload
+        self.set_running(False)
+        self.btn_start.configure(state="normal")
+        if ok:
+            self.update_action = None
+            self.show_update_button()
+            self.var_versions.set(f"{APP_TITLE} {APP_VERSION} · gallery-dl {version}")
+            self.var_update.set(tr(f"gallery-dl обновлён до {version}.",
+                                   f"gallery-dl updated to {version}."))
+            self.log(tr(f"— Готово! gallery-dl {version}.",
+                        f"— Done! gallery-dl {version}."), "ok")
+            self.var_status.set(tr("Готово к работе", "Ready"))
+        else:
+            self.var_update.set(tr("Не удалось обновить — смотри журнал.",
+                                   "Update failed — see the log."))
 
     def report_risky(self, names):
         if not names:
@@ -1769,6 +2358,17 @@ class App:
                     self.update_stats()
                 elif kind == "finish":
                     self.on_finish(payload)
+                elif kind == "export_progress":
+                    self.on_export_progress(payload)
+                elif kind == "export_done":
+                    self.on_export_done(payload)
+                elif kind == "gdl_version":
+                    self.var_versions.set(f"{APP_TITLE} {APP_VERSION} · "
+                                          f"gallery-dl {payload or '?'}")
+                elif kind == "updates":
+                    self.on_updates(payload)
+                elif kind == "update_done":
+                    self.on_update_done(payload)
                 elif kind == "connected":
                     self.on_connected(payload)
         except queue.Empty:
@@ -1795,8 +2395,35 @@ class App:
                         "— Connection didn't finish. Try again and click "
                         "“Authorize” in the browser."), "err")
 
+    def notify_finished(self, ok, body):
+        """Desktop notification + blinking taskbar, only if the app is in the
+        background (no point interrupting someone who is looking at it)."""
+        if not self.var_notify.get():
+            return
+        try:
+            focused = self.root.focus_displayof() is not None
+        except (KeyError, tk.TclError):
+            focused = False
+        if focused and self.root.state() != "iconic":
+            return
+        title = APP_TITLE + (" — " + tr("готово", "done") if ok else "")
+        send_notification(title, body)
+        flash_taskbar(self.root)
+
     def on_finish(self, result):
         self.set_running(False)
+        if result == "ok":
+            done, n = self.stats["done"], len(self.failed)
+            if n:
+                body = tr(f"Скачано: {files_word(done)}. Не скачалось: {n}.",
+                          f"Downloaded {files_word(done)}. Failed: {n}.")
+            else:
+                body = tr(f"Всё скачалось: {files_word(done)}.",
+                          f"Everything downloaded: {files_word(done)}.")
+            self.notify_finished(not n, body)
+        elif result == "error":
+            self.notify_finished(False, tr("Скачивание прервалось с ошибкой.",
+                                           "The download stopped with an error."))
         if result == "stopped":
             self.var_status.set(tr(
                 "Остановлено. Нажми «Скачать» — продолжит с места.",
