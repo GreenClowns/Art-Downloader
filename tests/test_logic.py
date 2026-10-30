@@ -1,5 +1,6 @@
 """Logic tests — no window, no internet: python3 -m pytest"""
 
+import os
 import sys
 from pathlib import Path
 
@@ -463,3 +464,49 @@ def test_latest_app_release(monkeypatch):
         raise OSError("no network")
     monkeypatch.setattr(a, "fetch_json", offline)
     assert a.latest_app_release() is None
+
+
+# ------------------------------------------------ Linux AppImage menu entry
+
+def test_desktop_quote():
+    assert a.desktop_quote("/home/u/Apps/Art.AppImage") == "/home/u/Apps/Art.AppImage"
+    q = a.desktop_quote('/home/u/My Apps/A "b" $X 50%.AppImage')
+    assert q == '"/home/u/My Apps/A \\\\"b\\\\" \\\\$X 50%%.AppImage"'
+
+
+def test_menu_entry_install_sync_remove(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "share"))
+    first = str(tmp_path / "Загрузки" / "My Apps" / "ArtDownloader.AppImage")
+    desktop = a.install_menu_entry(first)
+    text = desktop.read_text(encoding="utf-8")
+    assert a.menu_entry_target() == first
+    assert f'Exec="{first}"' in text and f'"{first}" {a.REMOVE_MENU_FLAG}' in text
+    assert (tmp_path / "share/icons/hicolor/256x256/apps/art-downloader.png").exists()
+    assert a.sync_menu_entry(first) is False             # same place: nothing to do
+    moved = str(tmp_path / "Apps" / "Art.AppImage")
+    assert a.sync_menu_entry(moved) is True and a.menu_entry_target() == moved
+    a.remove_menu_entry()
+    assert a.menu_entry_target() is None and not desktop.exists()
+    assert a.sync_menu_entry(moved) is False             # never re-adds by itself
+
+
+def test_entry_from_install_sh_is_left_alone(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    d = tmp_path / "applications"
+    d.mkdir()
+    (d / "art-downloader.desktop").write_text("[Desktop Entry]\nExec=python3 x.py\n")
+    assert a.sync_menu_entry("/somewhere/Art.AppImage") is False
+    assert "python3 x.py" in (d / "art-downloader.desktop").read_text()
+
+
+def test_host_env_is_restored(monkeypatch):
+    monkeypatch.setattr(a, "FROZEN", True)
+    monkeypatch.setattr(a, "WINDOWS", False)
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/bundle/lib")
+    monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", "/usr/local/lib")
+    a.restore_host_env()
+    assert os.environ["LD_LIBRARY_PATH"] == "/usr/local/lib"
+    assert "LD_LIBRARY_PATH_ORIG" not in os.environ
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/bundle/lib")
+    a.restore_host_env()                                  # no original → removed
+    assert "LD_LIBRARY_PATH" not in os.environ

@@ -21,11 +21,11 @@ If you type a password, it is passed to gallery-dl through a temporary file that
 - Never overwrites a different file; a name clash gets “ (2)”.
 - Warns if a download could run code (`.exe`, `.bat`, `.sh`, …).
 - Network: besides the sites you download from, the app only contacts `pypi.org` and `api.github.com` once a day to check for updates (no personal data is sent). Turn it off in Settings → Notifications and updates.
-- Library versions are pinned and checked with `pip-audit`; Dependabot proposes updates. GitHub Actions are pinned to exact commits and the build runs with read-only access.
+- Library versions are pinned and checked with `pip-audit`; Dependabot proposes updates. GitHub Actions are pinned to exact commits and the build runs with read-only access. Build tools for the AppImage are pinned versions checked by SHA-256.
 
 ## Known limitations
 
-- The Windows `.exe` is **not code-signed**, so Windows SmartScreen warns about it. Download it only from this repository's Releases page.
+- The Windows `.exe` is **not code-signed**, so Windows SmartScreen warns about it. The Linux AppImage isn't signed either. Download both only from this repository's Releases page.
 - The app trusts gallery-dl and the sites you download from. Downloaded files are not scanned for viruses.
 
 ## Reporting a problem
@@ -55,11 +55,11 @@ Please open an issue, or use **Security → Report a vulnerability** on GitHub i
 - Никогда не перезаписывает другой файл: при совпадении имени добавляется « (2)».
 - Предупреждает, если скачанный файл может запускать программы (`.exe`, `.bat`, `.sh`, …).
 - Сеть: кроме сайтов, с которых ты качаешь, программа раз в день обращается только к `pypi.org` и `api.github.com`, чтобы проверить обновления (личные данные не передаются). Отключается в Настройки → Уведомления и обновления.
-- Версии библиотек закреплены и проверены `pip-audit`; Dependabot предлагает обновления. Действия GitHub Actions закреплены по точным коммитам, сборка работает только с правами чтения.
+- Версии библиотек закреплены и проверены `pip-audit`; Dependabot предлагает обновления. Действия GitHub Actions закреплены по точным коммитам, сборка работает только с правами чтения. Инструменты сборки AppImage — закреплённые версии с проверкой SHA-256.
 
 ## Известные ограничения
 
-- `.exe` для Windows **не подписан цифровой подписью**, поэтому SmartScreen предупреждает о нём. Скачивай его только со страницы Releases этого репозитория.
+- `.exe` для Windows **не подписан цифровой подписью**, поэтому SmartScreen предупреждает о нём. AppImage для Linux тоже не подписан. Скачивай их только со страницы Releases этого репозитория.
 - Программа доверяет gallery-dl и сайтам, с которых скачивает. Скачанные файлы на вирусы не проверяются.
 
 ## Как сообщить о проблеме

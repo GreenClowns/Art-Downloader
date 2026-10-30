@@ -51,17 +51,17 @@ ArtDownloads/My Comic/
 
 Prefer no installation? Download `ArtDownloader-…-portable.zip`, unpack it anywhere and run `ArtDownloader.exe`.
 
-### Linux
+### Linux — one file, no terminal
 
-Tested on Fedora; Ubuntu/Debian work too.
+1. Open [**Releases**](https://github.com/GreenClowns/Art-Downloader/releases/latest) and download `ArtDownloader-…-x86_64.AppImage`. Everything is inside it — nothing else to install.
+2. Allow it to run (once): right-click the file → **Properties** → turn on **Executable as Program** (“Allow executing file as program” on some systems).
+3. Double-click it. On the first start the app offers to add itself to your applications menu — say **Yes**, and from then on start it like any other app (Super key → “Art”).
 
-1. Click the green **Code → Download ZIP** button and unpack the archive.
-2. Open a terminal in the unpacked folder and run once:
-   ```bash
-   bash install.sh
-   ```
-   The installer sets up everything it needs: `python3-tkinter` from your system (may ask for your computer password) and the app's own Python environment with its libraries (needs internet).
-3. Done: “Art Downloader” appears in your applications menu (press Super and start typing “Art”).
+Put the file somewhere permanent first (e.g. a folder `Apps` in your home folder). If you move it later, start it once from the new place and the menu entry follows. Works on Fedora, Ubuntu, Debian, Mint and other modern distributions.
+
+#### Linux from source (alternative)
+
+Click **Code → Download ZIP**, unpack it, open a terminal in the folder and run `bash install.sh` once. It sets up the app's own Python environment (needs internet; may ask for your computer password for `python3-tkinter`).
 
 Or with git:
 
@@ -98,11 +98,9 @@ Linux: `~/.config/art_downloader.json`. Windows: `%APPDATA%\ArtDownloader\settin
 
 **Windows:** Settings → Apps → Art Downloader → Uninstall.
 
-**Linux:** right-click the app icon in the menu → **“Uninstall Art Downloader”**. Or:
+**Linux (AppImage):** right-click the app icon in the menu → **“Remove from the applications menu”**, then delete the `.AppImage` file.
 
-```bash
-bash install.sh uninstall
-```
+**Linux (from source):** right-click the app icon in the menu → **“Uninstall Art Downloader”**, or run `bash install.sh uninstall`.
 
 Your downloaded images are not deleted.
 
@@ -116,7 +114,7 @@ python3 art_downloader.py
 python3 -m pytest
 ```
 
-The Windows build is made by GitHub Actions ([`windows.yml`](.github/workflows/windows.yml)): PyInstaller bundles the app together with gallery-dl, Inno Setup makes the installer. Publishing a GitHub Release with a tag such as `v1.0.0` builds it and attaches the files. Icons are generated from the logo with `python3 tools/make_icons.py`.
+Release builds are made by GitHub Actions ([`build.yml`](.github/workflows/build.yml)): PyInstaller bundles the app together with gallery-dl; Inno Setup makes the Windows installer and [`linux/build_appimage.sh`](linux/build_appimage.sh) the AppImage. Publishing a GitHub Release with a tag such as `v1.0.0` builds it and attaches the files. Icons are generated from the logo with `python3 tools/make_icons.py`.
 
 ## Security
 

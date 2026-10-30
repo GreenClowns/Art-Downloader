@@ -204,6 +204,128 @@ def resource_path(name):
     return None
 
 
+# --------------------------------------------------------------------------
+# Linux AppImage: menu entry and system programs
+# --------------------------------------------------------------------------
+
+APPIMAGE = os.environ.get("APPIMAGE")       # set by the AppImage runtime
+DESKTOP_ID = "art-downloader"
+REMOVE_MENU_FLAG = "--remove-menu-entry"
+SELF_TEST_FLAG = "--self-test"
+APPIMAGE_KEY = "X-ArtDownloader-AppImage"
+
+
+def restore_host_env():
+    """
+    A bundled Linux app runs with LD_LIBRARY_PATH pointing at its own
+    libraries. Programs of the user's system (browser, file manager,
+    notify-send) must not inherit that, or they may fail to start. glibc
+    reads LD_LIBRARY_PATH only at start-up, so this process isn't affected,
+    and the app's own helper processes get it again from the launcher.
+    """
+    if not FROZEN or WINDOWS:
+        return
+    orig = os.environ.pop("LD_LIBRARY_PATH_ORIG", None)
+    if orig:
+        os.environ["LD_LIBRARY_PATH"] = orig
+    else:
+        os.environ.pop("LD_LIBRARY_PATH", None)
+
+
+def desktop_quote(arg):
+    """One argument for the Exec= line of a .desktop file (freedesktop spec)."""
+    if re.fullmatch(r"[\w/.+,:@=-]+", arg):
+        return arg.replace("%", "%%")
+    quoted = '"' + re.sub(r'(["`$\\])', r"\\\1", arg) + '"'
+    return quoted.replace("\\", "\\\\").replace("%", "%%")
+
+
+def menu_paths():
+    data = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+    return (data / "applications" / f"{DESKTOP_ID}.desktop",
+            data / "icons" / "hicolor" / "256x256" / "apps" / f"{DESKTOP_ID}.png")
+
+
+def desktop_entry(exec_path, icon_path):
+    run = desktop_quote(str(exec_path))
+    return (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=Art Downloader\n"
+        "Comment=Download art and comics from DeviantArt and other sites\n"
+        "Comment[ru]=Скачивание артов и комиксов с DeviantArt и других сайтов\n"
+        f"Exec={run}\n"
+        f"Icon={icon_path}\n"
+        "Terminal=false\n"
+        "Categories=Network;FileTransfer;\n"
+        "StartupWMClass=art-downloader\n"
+        "Actions=remove;\n"
+        f"{APPIMAGE_KEY}={exec_path}\n"
+        "\n"
+        "[Desktop Action remove]\n"
+        "Name=Remove from the applications menu\n"
+        "Name[ru]=Убрать из меню приложений\n"
+        f"Exec={run} {REMOVE_MENU_FLAG}\n")
+
+
+def _refresh_menus(folder):
+    if shutil.which("update-desktop-database"):
+        try:
+            subprocess.run(["update-desktop-database", str(folder)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=20)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+def install_menu_entry(exec_path):
+    """Adds the app to the applications menu (only for the current user)."""
+    desktop, icon = menu_paths()
+    src = resource_path("icon.png")
+    icon.parent.mkdir(parents=True, exist_ok=True)
+    if src:
+        shutil.copyfile(src, icon)
+    desktop.parent.mkdir(parents=True, exist_ok=True)
+    tmp = desktop.with_name(f".{desktop.name}.tmp")
+    tmp.write_text(desktop_entry(exec_path, icon), encoding="utf-8")
+    tmp.chmod(0o755)
+    tmp.replace(desktop)
+    _refresh_menus(desktop.parent)
+    return desktop
+
+
+def menu_entry_target():
+    """The AppImage the menu entry starts (None if there's no such entry)."""
+    desktop, _ = menu_paths()
+    try:
+        for line in desktop.read_text(encoding="utf-8").splitlines():
+            if line.startswith(APPIMAGE_KEY + "="):
+                return line.split("=", 1)[1]
+    except OSError:
+        pass
+    return None
+
+
+def remove_menu_entry():
+    desktop, icon = menu_paths()
+    for f in (desktop, icon):
+        try:
+            f.unlink()
+        except OSError:
+            pass
+    _refresh_menus(desktop.parent)
+
+
+def sync_menu_entry(appimage=None):
+    """If the AppImage was moved or renamed, point the menu entry at it."""
+    appimage = appimage or APPIMAGE
+    target = menu_entry_target()
+    if appimage and target and target != appimage:
+        install_menu_entry(appimage)
+        return True
+    return False
+
+
 def run_builtin_gallery_dl(args):
     """
     Entry point for `ArtDownloader.exe --gallery-dl …`: the windowed .exe
@@ -234,6 +356,7 @@ def run_builtin_gallery_dl(args):
             stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError):
             pass
+    restore_host_env()          # so the OAuth step can open the browser
     from gallery_dl import main as gallery_dl_main
     sys.argv = ["gallery-dl"] + list(args)
     sys.exit(gallery_dl_main())
@@ -1177,6 +1300,7 @@ class App:
         self.counting_skips = True
         self.total_works = 0
         self.works_started = 0
+        self.seen_warnings = set()
 
         cfg = migrate_config(self.load_config())
         set_lang(cfg.get("lang") or detect_lang())
@@ -1198,6 +1322,8 @@ class App:
         self.update_action = None          # what the update button does
         self.var_versions = tk.StringVar(value=f"{APP_TITLE} {APP_VERSION}")
         self.var_update = tk.StringVar(value="")
+        self.menu_asked = bool(cfg.get("appimage_menu_asked", False))
+        self.var_menu = tk.StringVar()
         self.da_connected = bool(cfg.get("da_connected", False))
         self.var_connected = tk.StringVar()
         self.var_status = tk.StringVar()
@@ -1212,6 +1338,12 @@ class App:
         self.root.after(100, self.poll_events)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.after(2500, self.auto_check_updates)
+        if APPIMAGE:
+            try:
+                sync_menu_entry()
+            except OSError:
+                pass
+            self.root.after(1200, self.offer_menu_entry)
 
     # ---------- interface ----------
 
@@ -1252,6 +1384,7 @@ class App:
         # forget widgets of a previous build (language change rebuilds all)
         self.btn_connect = self.btn_da_status = self.cmb_lang = None
         self.btn_export = self.btn_check = self.btn_update = None
+        self.btn_menu = None
         # Header: logo, title, DeviantArt status
         header = ctk.CTkFrame(self.root, fg_color="transparent")
         header.pack(fill="x", padx=20, pady=(16, 4))
@@ -1456,6 +1589,20 @@ class App:
                                        self.theme_key, command=self.change_theme)
         self.seg_theme.widget.pack(side="left")
 
+        # Linux AppImage: applications menu
+        if APPIMAGE:
+            menu = self.card(scroll)
+            self.heading(menu, tr("Меню приложений", "Applications menu"))
+            ctk.CTkLabel(menu, textvariable=self.var_menu, font=self.font(12),
+                         text_color=MUTED, anchor="w", justify="left",
+                         wraplength=760).pack(fill="x", padx=16, pady=(2, 8))
+            self.btn_menu = ctk.CTkButton(
+                menu, text="", height=34, fg_color=WINDOW_BG,
+                text_color=("#111827", "#f3f4f6"),
+                hover_color=("#e5e7eb", "#2a2c30"), command=self.toggle_menu_entry)
+            self.btn_menu.pack(anchor="w", padx=16, pady=(0, 16))
+            self.update_menu_card()
+
         # Notifications and updates
         upd = self.card(scroll)
         self.heading(upd, tr("Уведомления и обновления", "Notifications and updates"))
@@ -1570,6 +1717,7 @@ class App:
                 "notify": self.var_notify.get(),
                 "auto_update": self.var_autoupdate.get(),
                 "last_update_check": self.last_update_check,
+                "appimage_menu_asked": self.menu_asked,
             }, ensure_ascii=False, indent=2), encoding="utf-8")
         except OSError:
             pass
@@ -1720,6 +1868,7 @@ class App:
         self.counting_skips = True
         self.total_works = 0
         self.works_started = 0
+        self.seen_warnings = set()
         self.update_stats()
         self.stop_flag.clear()
         self.set_running(True)
@@ -1792,6 +1941,61 @@ class App:
         self.report_renumbered(reorder(folder, self.cmb_order.get()))
         if self.var_sort.get():
             self.report_sorted(sort_all_chapters(folder))
+
+    # ---------- Linux AppImage menu entry ----------
+
+    def update_menu_card(self):
+        if not getattr(self, "btn_menu", None):
+            return
+        if menu_entry_target():
+            self.var_menu.set(tr(
+                "Art Downloader есть в меню приложений. Если переместишь файл "
+                "программы, значок обновится сам при следующем запуске.",
+                "Art Downloader is in your applications menu. If you move the "
+                "app file, the entry updates itself on the next start."))
+            self.btn_menu.configure(text=tr("Убрать из меню", "Remove from the menu"))
+        else:
+            self.var_menu.set(tr(
+                "Добавь программу в меню, чтобы запускать её как обычное "
+                "приложение (клавиша Super → «Art»).",
+                "Add the app to your menu to start it like any other app "
+                "(Super key → “Art”)."))
+            self.btn_menu.configure(text=tr("Добавить в меню приложений",
+                                            "Add to the applications menu"))
+
+    def toggle_menu_entry(self):
+        try:
+            if menu_entry_target():
+                remove_menu_entry()
+                self.log(tr("Убрано из меню приложений.",
+                            "Removed from the applications menu."), "info")
+            else:
+                install_menu_entry(APPIMAGE)
+                self.log(tr("Добавлено в меню приложений.",
+                            "Added to the applications menu."), "ok")
+        except OSError as e:
+            self.log(tr(f"Не получилось: {e}", f"That didn't work: {e}"), "err")
+        self.update_menu_card()
+
+    def offer_menu_entry(self):
+        if self.menu_asked or menu_entry_target():
+            return
+        self.menu_asked = True
+        self.save_config()
+        if messagebox.askyesno(APP_TITLE, tr(
+                "Добавить Art Downloader в меню приложений?\n\n"
+                "Тогда его можно будет запускать как обычную программу. "
+                "Это можно сделать и позже в Настройках.",
+                "Add Art Downloader to your applications menu?\n\n"
+                "Then you can start it like any other app. You can also do "
+                "this later in Settings.")):
+            try:
+                install_menu_entry(APPIMAGE)
+                self.log(tr("Добавлено в меню приложений.",
+                            "Added to the applications menu."), "ok")
+            except OSError as e:
+                self.log(tr(f"Не получилось: {e}", f"That didn't work: {e}"), "err")
+            self.update_menu_card()
 
     # ---------- export to CBZ / PDF ----------
 
@@ -2297,6 +2501,11 @@ class App:
                     "DeviantArt asks for a captcha, click “Connect DeviantArt”."),
                     "err")
         elif "[warning]" in line:
+            # the same warning from every thread is shown only once per run
+            key = re.sub(r"'[^']*'|\d+", "", line)
+            if key in self.seen_warnings:
+                return
+            self.seen_warnings.add(key)
             self.log(line if len(line) < 220 else line[:220] + " …", "err")
             if "cookies" in low and "unable to find" in low:
                 self.log(tr("   ↳ В этом браузере нет входа. Выбери другой "
@@ -2457,6 +2666,10 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == GALLERY_DL_FLAG:
         run_builtin_gallery_dl(sys.argv[2:])
         return
+    restore_host_env()
+    if len(sys.argv) > 1 and sys.argv[1] == REMOVE_MENU_FLAG:
+        remove_menu_entry()
+        return
     if WINDOWS:
         try:  # sharp text on high-DPI screens
             import ctypes
@@ -2465,7 +2678,14 @@ def main():
             pass
     ctk.set_default_color_theme("green")
     root = ctk.CTk(className="art-downloader")   # matches the menu icon
-    App(root)
+    app = App(root)
+    if SELF_TEST_FLAG in sys.argv[1:]:          # used by the release build
+        for _ in range(20):
+            root.update()
+        ok = app.gdl is not None and gallery_dl_version(app.gdl) is not None
+        print("self-test:", "ok" if ok else "gallery-dl not working", flush=True)
+        root.destroy()
+        sys.exit(0 if ok else 1)
     root.mainloop()
 
 

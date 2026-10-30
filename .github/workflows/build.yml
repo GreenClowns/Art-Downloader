@@ -1,9 +1,9 @@
-name: windows
+name: build
 
-# Builds the Windows app. Every push to main produces a test build
-# (Actions → windows → Artifacts). Publishing a GitHub Release with a tag
-# like v1.2.3 builds that version and attaches the installer and the
-# portable ZIP to the release.
+# Builds the Windows app (installer + portable ZIP) and the Linux AppImage.
+# Every push to main produces test builds (Actions → build → Artifacts).
+# Publishing a GitHub Release with a tag like v1.2.3 builds that version and
+# attaches all files to the release.
 #
 # Security: the build job only has read access; only the small release job
 # can write, and only for published releases. Third-party actions are
@@ -95,6 +95,9 @@ jobs:
                                capture_output=True, text=True, timeout=120)
           assert "deviantart" in ext.stdout.lower(), ext.stdout + ext.stderr
           print("deviantart extractor: ok")
+          ui = subprocess.run([exe, "--self-test"], timeout=180)
+          assert ui.returncode == 0, "the window did not start"
+          print("window: ok")
           '@
           python -c $code
 
@@ -121,16 +124,75 @@ jobs:
             dist/*-Setup.exe
             dist/*-portable.zip
 
+  linux:
+    # the oldest supported runner: the AppImage then also runs on older systems
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libtk8.6 libtcl8.6 xvfb
+
+      - name: Install build tools
+        run: python -m pip install --upgrade pip pyinstaller pytest -r requirements.txt
+
+      - name: Tests
+        run: python -m pytest -q
+
+      - name: Version
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          v="0.0.0"
+          if [ "$REF_TYPE" = "tag" ]; then
+            v="${REF_NAME#v}"
+            if ! printf '%s' "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "Release tag must look like v1.2.3, got '$REF_NAME'" >&2
+              exit 1
+            fi
+          fi
+          echo "value=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Build AppImage
+        env:
+          APP_VERSION: ${{ steps.version.outputs.value }}
+        run: PYTHON=python bash linux/build_appimage.sh "$APP_VERSION"
+
+      - name: Smoke test
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          app=$(ls dist/*.AppImage)
+          "$app" --gallery-dl --version
+          "$app" --gallery-dl --list-extractors deviantart | grep -qi deviantart
+          xvfb-run -a "$app" --self-test
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ArtDownloader-linux
+          path: dist/*.AppImage
+
   release:
     if: github.event_name == 'release'
-    needs: build
+    needs: [build, linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: ArtDownloader-windows
+          pattern: ArtDownloader-*
+          merge-multiple: true
           path: dist
 
       - name: Attach files to the release
@@ -139,3 +201,4 @@ jobs:
           files: |
             dist/*-Setup.exe
             dist/*-portable.zip
+            dist/*.AppImage

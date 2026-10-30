@@ -129,7 +129,7 @@ Comment[ru]=Скачивание артов и комиксов с DeviantArt и
 Exec=$VENV/bin/python $APP_DIR/art_downloader.py
 Icon=$ICON
 Terminal=false
-Categories=Network;Graphics;
+Categories=Network;FileTransfer;
 StartupWMClass=art-downloader
 Actions=uninstall;
 
