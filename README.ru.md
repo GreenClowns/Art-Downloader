@@ -4,14 +4,17 @@
 
 <p align="center">
   <b>Скачивай целые галереи и комиксы с DeviantArt — по порядку чтения и без путаницы в файлах.</b><br>
-  Windows · Linux · Русский / English
+  Windows · Linux · 6 языков
 </p>
 
 <p align="center">
   <a href="https://github.com/GreenClowns/Art-Downloader/releases/latest"><b>⬇ Скачать</b></a> ·
   <a href="#как-пользоваться">Как пользоваться</a> ·
-  <a href="#частые-вопросы">Вопросы</a> ·
-  <a href="README.md">English</a>
+  <a href="#частые-вопросы">Вопросы</a>
+</p>
+
+<p align="center">
+  <a href="README.md">English</a> · <b>Русский</b> · <a href="README.uk.md">Українська</a> · <a href="README.es.md">Español</a> · <a href="README.ja.md">日本語</a> · <a href="README.zh.md">中文</a>
 </p>
 
 <p align="center">
@@ -67,7 +70,7 @@
 - **В CBZ / PDF…**: по книге на главу. CBZ сохраняет оригинальные картинки (для читалок комиксов), PDF открывается на любом устройстве.
 - **Системное уведомление**, когда скачивание закончилось, а окно было в фоне.
 - **Обновления**: проверка раз в день; gallery-dl обновляется одной кнопкой (DeviantArt меняет сайт, и старые версии загрузчиков перестают работать).
-- Светлая и тёмная тема, русский и английский язык — по умолчанию как в системе.
+- Светлая и тёмная тема; English, Русский, Українська, Español, 日本語 и 中文 — тема и язык по умолчанию как в системе.
 
 Что получается:
 
@@ -139,7 +142,7 @@ Linux: `~/.config/art_downloader.json`. Windows: `%APPDATA%\ArtDownloader\settin
 
 ## Для разработчиков
 
-Вся программа — один файл [`art_downloader.py`](art_downloader.py): Python и [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter); скачивание выполняет [gallery-dl](https://github.com/mikf/gallery-dl).
+Вся программа — один файл [`art_downloader.py`](art_downloader.py): Python и [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter); скачивание выполняет [gallery-dl](https://github.com/mikf/gallery-dl). Русские и английские тексты написаны прямо в коде, украинские, испанские, японские и китайские — в словаре `TRANSLATIONS` в том же файле (тест следит, чтобы ничего не пропало).
 
 ```bash
 git clone https://github.com/GreenClowns/Art-Downloader.git

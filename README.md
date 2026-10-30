@@ -4,14 +4,17 @@
 
 <p align="center">
   <b>Download whole art galleries and comics from DeviantArt — in reading order, with nothing mixed up.</b><br>
-  Windows · Linux · English / Русский
+  Windows · Linux · 6 languages
 </p>
 
 <p align="center">
   <a href="https://github.com/GreenClowns/Art-Downloader/releases/latest"><b>⬇ Download</b></a> ·
   <a href="#how-to-use">How to use</a> ·
-  <a href="#faq">FAQ</a> ·
-  <a href="README.ru.md">Русский</a>
+  <a href="#faq">FAQ</a>
+</p>
+
+<p align="center">
+  <b>English</b> · <a href="README.ru.md">Русский</a> · <a href="README.uk.md">Українська</a> · <a href="README.es.md">Español</a> · <a href="README.ja.md">日本語</a> · <a href="README.zh.md">中文</a>
 </p>
 
 <p align="center">
@@ -67,7 +70,7 @@ If you move the file later, start it once from the new place and the menu entry 
 - **To CBZ / PDF…**: one book per chapter. CBZ keeps the original images (for comic readers), PDF opens on any device.
 - A **desktop notification** when a download finishes while the window is in the background.
 - **Updates**: checks once a day; gallery-dl can be updated with one click (DeviantArt changes break old versions of downloaders).
-- Light and dark themes, English and Russian — both follow your system by default.
+- Light and dark themes; English, Русский, Українська, Español, 日本語 and 中文 — theme and language follow your system by default.
 
 What you get:
 
@@ -139,7 +142,7 @@ Details: [SECURITY.md](SECURITY.md).
 
 ## For developers
 
-The whole app is one file, [`art_downloader.py`](art_downloader.py) — Python with [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter); downloading is done by [gallery-dl](https://github.com/mikf/gallery-dl).
+The whole app is one file, [`art_downloader.py`](art_downloader.py) — Python with [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter); downloading is done by [gallery-dl](https://github.com/mikf/gallery-dl). Russian and English texts are written in the code; Ukrainian, Spanish, Japanese and Chinese are in the `TRANSLATIONS` dictionary in the same file (a test makes sure nothing is missing).
 
 ```bash
 git clone https://github.com/GreenClowns/Art-Downloader.git

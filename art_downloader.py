@@ -86,20 +86,26 @@ CHAPTER_DIR_RE = re.compile(r"^Chapter \d+$")
 # Language
 # --------------------------------------------------------------------------
 
-LANGUAGES = {"en": "English", "ru": "Русский"}
+LANGUAGES = {"en": "English", "ru": "Русский", "uk": "Українська",
+             "es": "Español", "ja": "日本語", "zh": "中文"}
 _lang = "en"
 
-
-RU_LANG_IDS = {0x19, 0x22, 0x23, 0x3F}       # Windows: ru, uk, be, kk
+# Locale prefixes → interface language (Belarusian and Kazakh users mostly
+# read Russian; other unknown languages get English)
+LOCALE_LANGS = {"en": "en", "ru": "ru", "be": "ru", "kk": "ru", "uk": "uk",
+                "es": "es", "ja": "ja", "zh": "zh"}
+# Windows primary language ids
+WINDOWS_LANGS = {0x09: "en", 0x19: "ru", 0x23: "ru", 0x3F: "ru", 0x22: "uk",
+                 0x0A: "es", 0x11: "ja", 0x04: "zh"}
 
 
 def detect_lang(env=None, windows_lang_id=None):
-    """Interface language from the system locale: Russian for ru/uk/be/kk."""
+    """Interface language from the system settings."""
     env = os.environ if env is None else env
     for var in ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"):
         value = (env.get(var) or "").lower()
-        if value:
-            return "ru" if value[:2] in ("ru", "uk", "be", "kk") else "en"
+        if value and value not in ("c", "posix", "c.utf-8"):
+            return LOCALE_LANGS.get(value[:2], "en")
     if windows_lang_id is None and WINDOWS:
         try:
             import ctypes
@@ -107,7 +113,7 @@ def detect_lang(env=None, windows_lang_id=None):
         except Exception:
             windows_lang_id = 0
     if windows_lang_id:
-        return "ru" if (windows_lang_id & 0x3FF) in RU_LANG_IDS else "en"
+        return WINDOWS_LANGS.get(windows_lang_id & 0x3FF, "en")
     return "en"
 
 
@@ -120,20 +126,43 @@ def get_lang():
     return _lang
 
 
-def files_word(n):
-    """'3 файла' / '5 файлов' / '1 file' / '2 files'."""
-    if _lang != "ru":
-        return f"{n} file" + ("" if n == 1 else "s")
+def _slavic_plural(n, one, few, many):
     if n % 10 == 1 and n % 100 != 11:
-        return f"{n} файл"
+        return one
     if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
-        return f"{n} файла"
-    return f"{n} файлов"
+        return few
+    return many
 
 
-def tr(ru, en):
-    """Pick the string for the current interface language."""
-    return ru if _lang == "ru" else en
+def files_word(n):
+    """'1 file' / '3 файла' / '5 файлів' / '2 archivos' / '3 個のファイル' …"""
+    if _lang == "ru":
+        return f"{n} " + _slavic_plural(n, "файл", "файла", "файлов")
+    if _lang == "uk":
+        return f"{n} " + _slavic_plural(n, "файл", "файли", "файлів")
+    if _lang == "es":
+        return f"{n} archivo" + ("" if n == 1 else "s")
+    if _lang == "ja":
+        return f"{n} 個のファイル"
+    if _lang == "zh":
+        return f"{n} 个文件"
+    return f"{n} file" + ("" if n == 1 else "s")
+
+
+def tr(ru, en, _key=None, **values):
+    """
+    Text in the current interface language. Russian and English are written
+    at the call site; other languages come from TRANSLATIONS (keyed by the
+    English text), falling back to English. {name} fields are filled from
+    `values`.
+    """
+    if _lang == "ru":
+        text = ru
+    elif _lang == "en":
+        text = en
+    else:
+        text = TRANSLATIONS.get(_key or en, {}).get(_lang, en)
+    return text.format(**values) if values else text
 
 
 def browser_label(key):
@@ -268,6 +297,10 @@ def desktop_entry(exec_path, icon_path):
         "Name=Art Downloader\n"
         "Comment=Download art and comics from DeviantArt and other sites\n"
         "Comment[ru]=Скачивание артов и комиксов с DeviantArt и других сайтов\n"
+        "Comment[uk]=Завантаження артів і коміксів з DeviantArt та інших сайтів\n"
+        "Comment[es]=Descarga arte y cómics de DeviantArt y otros sitios\n"
+        "Comment[ja]=DeviantArt などからイラストや漫画をダウンロード\n"
+        "Comment[zh_CN]=从 DeviantArt 等网站下载插画和漫画\n"
         f"Exec={run}\n"
         f"Icon={icon_path}\n"
         "Terminal=false\n"
@@ -279,6 +312,10 @@ def desktop_entry(exec_path, icon_path):
         "[Desktop Action remove]\n"
         "Name=Remove from the applications menu\n"
         "Name[ru]=Убрать из меню приложений\n"
+        "Name[uk]=Прибрати з меню застосунків\n"
+        "Name[es]=Quitar del menú de aplicaciones\n"
+        "Name[ja]=アプリケーションメニューから削除\n"
+        "Name[zh_CN]=从应用程序菜单中移除\n"
         f"Exec={run} {REMOVE_MENU_FLAG}\n")
 
 
@@ -1255,8 +1292,9 @@ def theme_label(key):
 class KeyedOption:
     """Option menu that shows translated labels but stores keys."""
 
-    def __init__(self, parent, keys, label_fn, key, width=220):
+    def __init__(self, parent, keys, label_fn, key, width=220, command=None):
         self.keys, self.label_fn, self.key = keys, label_fn, key
+        self.command = command
         self.widget = ctk.CTkOptionMenu(
             parent, width=width, values=[label_fn(k) for k in keys],
             command=self._changed, fg_color=WINDOW_BG, button_color=WINDOW_BG,
@@ -1268,6 +1306,8 @@ class KeyedOption:
         labels = [self.label_fn(k) for k in self.keys]
         if label in labels:
             self.key = self.keys[labels.index(label)]
+            if self.command:
+                self.command(self.key)
 
     def get(self):
         return self.key
@@ -1423,7 +1463,7 @@ class App:
             segmented_button_selected_color=ACCENT,
             segmented_button_selected_hover_color=ACCENT_HOVER)
         self.tabs.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-        self.tab_main_name = tr("Загрузка", "Download")
+        self.tab_main_name = tr("Загрузка", "Download", _key="tab:Download")
         self.tab_settings_name = tr("Настройки", "Settings")
         self.build_main_tab(self.tabs.add(self.tab_main_name))
         self.build_settings_tab(self.tabs.add(self.tab_settings_name))
@@ -1593,8 +1633,9 @@ class App:
         row.pack(fill="x", padx=16, pady=(8, 8))
         ctk.CTkLabel(row, text=tr("Язык:", "Language:"), width=90, anchor="w",
                      font=self.font(13)).pack(side="left")
-        self.cmb_lang = KeyedSegments(row, list(LANGUAGES), LANGUAGES.get,
-                                      get_lang(), command=self.change_language)
+        self.cmb_lang = KeyedOption(row, list(LANGUAGES), LANGUAGES.get,
+                                    get_lang(), width=180,
+                                    command=self.change_language)
         self.cmb_lang.widget.pack(side="left")
         row = ctk.CTkFrame(look, fg_color="transparent")
         row.pack(fill="x", padx=16, pady=(0, 16))
@@ -1767,7 +1808,8 @@ class App:
 
     def install_hint(self):
         cmd = "pip install gallery-dl" if WINDOWS else "pipx install gallery-dl"
-        return tr(f"Установи его: {cmd}", f"Install it: {cmd}")
+        return tr('Установи его: {cmd}',
+                  'Install it: {cmd}', cmd=cmd)
 
     def check_gallery_dl(self):
         self.gdl = find_gallery_dl()
@@ -1780,8 +1822,8 @@ class App:
                         "gallery-dl is built into the app"), "info")
         elif self.gdl:
             where = " ".join(self.gdl)
-            self.log(tr(f"gallery-dl найден: {where}",
-                        f"gallery-dl found: {where}"), "info")
+            self.log(tr('gallery-dl найден: {where}',
+                        'gallery-dl found: {where}', where=where), "info")
         else:
             self.log(tr("gallery-dl не найден! ", "gallery-dl not found! ")
                      + self.install_hint(), "err")
@@ -1815,9 +1857,8 @@ class App:
 
     def update_stats(self):
         s = self.stats
-        self.var_stats.set(tr(
-            f"скачано {s['done']} · пропущено {s['skip']} · ошибок {s['err']}",
-            f"{s['done']} downloaded · {s['skip']} skipped · {s['err']} errors"))
+        self.var_stats.set(tr('скачано {done} · пропущено {skipped} · ошибок {errors}',
+                              'downloaded {done} · skipped {skipped} · errors {errors}', done=s['done'], skipped=s['skip'], errors=s['err']))
 
     def show_progress(self, fraction):
         """Real progress once gallery-dl reports "k of N"."""
@@ -1887,8 +1928,8 @@ class App:
         self.update_stats()
         self.stop_flag.clear()
         self.set_running(True)
-        self.log(tr(f"— Начинаю: {len(urls)} ссылок → {dest}",
-                    f"— Starting: {len(urls)} links → {dest}"), "info")
+        self.log(tr('— Начинаю: {links} ссылок → {dest}',
+                    '— Starting: {links} links → {dest}', links=len(urls), dest=dest), "info")
 
         self.worker = threading.Thread(
             target=self.run_job,
@@ -1935,7 +1976,8 @@ class App:
         try:
             self.run_process(["oauth:deviantart"], on_line)
         except Exception as e:
-            self.emit("log", (tr(f"Ошибка: {e}", f"Error: {e}"), "err"))
+            self.emit("log", (tr('Ошибка: {e}',
+                                 'Error: {e}', e=e), "err"))
         self.emit("connected", ok[0])
 
     def stop(self):
@@ -1949,8 +1991,8 @@ class App:
     def organize_now(self):
         folder = self.dest_folder()
         if not folder.is_dir():
-            messagebox.showinfo(APP_TITLE, tr(f"Папки пока нет:\n{folder}",
-                                              f"Folder doesn't exist yet:\n{folder}"))
+            messagebox.showinfo(APP_TITLE, tr('Папки пока нет:\n{folder}',
+                                              "Folder doesn't exist yet:\n{folder}", folder=folder))
             return
         self.report_organized(organize(folder, load_order(folder)))
         self.report_renumbered(reorder(folder, self.cmb_order.get()))
@@ -1989,7 +2031,8 @@ class App:
                 self.log(tr("Добавлено в меню приложений.",
                             "Added to the applications menu."), "ok")
         except OSError as e:
-            self.log(tr(f"Не получилось: {e}", f"That didn't work: {e}"), "err")
+            self.log(tr('Не получилось: {e}',
+                        "That didn't work: {e}", e=e), "err")
         self.update_menu_card()
 
     def offer_menu_entry(self):
@@ -2009,7 +2052,8 @@ class App:
                 self.log(tr("Добавлено в меню приложений.",
                             "Added to the applications menu."), "ok")
             except OSError as e:
-                self.log(tr(f"Не получилось: {e}", f"That didn't work: {e}"), "err")
+                self.log(tr('Не получилось: {e}',
+                            "That didn't work: {e}", e=e), "err")
             self.update_menu_card()
 
     # ---------- export to CBZ / PDF ----------
@@ -2018,9 +2062,8 @@ class App:
         folder = self.dest_folder()
         plan = export_plan(folder) if folder.is_dir() else []
         if not plan:
-            messagebox.showinfo(APP_TITLE, tr(
-                f"В папке пока нет скачанных глав:\n{folder}",
-                f"No downloaded chapters in this folder yet:\n{folder}"))
+            messagebox.showinfo(APP_TITLE, tr('В папке пока нет скачанных глав:\n{folder}',
+                                              'No downloaded chapters in this folder yet:\n{folder}', folder=folder))
             return
         win = ctk.CTkToplevel(self.root)
         win.title(tr("Экспорт в CBZ / PDF", "Export to CBZ / PDF"))
@@ -2030,14 +2073,16 @@ class App:
         win.configure(fg_color=WINDOW_BG)
         body = ctk.CTkFrame(win, fg_color=CARD, corner_radius=12)
         body.pack(fill="both", expand=True, padx=16, pady=16)
-        self.heading(body, tr(f"Книг: {len(plan)}", f"Books: {len(plan)}"), tr(
+        self.heading(body, tr('Книг: {books}',
+                              'Books: {books}', books=len(plan)), tr(
             "По одной книге на главу (папку Chapter NN) или на папку. "
             "Страницы — в том же порядке, что и файлы.",
             "One book per chapter (Chapter NN folder) or per folder. "
             "Pages follow the file order."), wrap=500)
         names = "\n".join("• " + n for n, _ in plan[:6])
         if len(plan) > 6:
-            names += "\n" + tr(f"…и ещё {len(plan) - 6}", f"…and {len(plan) - 6} more")
+            names += "\n" + tr('…и ещё {more}',
+                               '…and {more} more', more=len(plan) - 6)
         ctk.CTkLabel(body, text=names, font=self.font(12), anchor="w",
                      justify="left").pack(fill="x", padx=16, pady=(8, 4))
         fmt = KeyedSegments(body, ["cbz", "pdf"], lambda k: {
@@ -2070,7 +2115,8 @@ class App:
         self.stop_flag.clear()
         self.set_running(True)
         self.btn_start.configure(state="disabled")
-        self.log(tr(f"— Экспорт в {fmt.upper()}…", f"— Exporting to {fmt.upper()}…"),
+        self.log(tr('— Экспорт в {fmt}…',
+                    '— Exporting to {fmt}…', fmt=fmt.upper()),
                  "info")
 
         def work():
@@ -2086,7 +2132,8 @@ class App:
 
     def on_export_progress(self, payload):
         i, n, name = payload
-        self.var_status.set(tr(f"Экспорт: {i} из {n}", f"Exporting: {i} of {n}"))
+        self.var_status.set(tr('Экспорт: {i} из {n}',
+                               'Exporting: {i} of {n}', i=i, n=n))
         self.show_progress((i - 1) / n)
         self.log(f"   {name}", "info")
 
@@ -2095,17 +2142,17 @@ class App:
         self.set_running(False)
         self.btn_start.configure(state="normal")
         if ok:
-            self.var_status.set(tr(f"Готово: книг {len(result)}",
-                                   f"Done: {len(result)} books"))
-            self.log(tr(f"— Готово! Книги в папке {EXPORT_DIR}.",
-                        f"— Done! The books are in the {EXPORT_DIR} folder."), "ok")
-            self.notify_finished(True, tr(f"Экспорт готов: книг {len(result)}.",
-                                          f"Export finished: {len(result)} books."))
+            self.var_status.set(tr('Готово: книг {books}',
+                                   'Done: {books} books', books=len(result)))
+            self.log(tr('— Готово! Книги в папке {folder}.',
+                        '— Done! The books are in the {folder} folder.', folder=EXPORT_DIR), "ok")
+            self.notify_finished(True, tr('Экспорт готов: книг {books}.',
+                                          'Export finished: {books} books.', books=len(result)))
         else:
             self.var_status.set(tr("Ошибка экспорта — смотри журнал",
                                    "Export failed — see the log"))
-            self.log(tr(f"Не удалось сделать книгу: {result}",
-                        f"Could not make a book: {result}"), "err")
+            self.log(tr('Не удалось сделать книгу: {result}',
+                        'Could not make a book: {result}', result=result), "err")
 
     # ---------- updates ----------
 
@@ -2145,24 +2192,20 @@ class App:
         new_gdl = latest if latest and cur and is_newer(latest, cur) else None
         lines, self.update_action = [], None
         if new_app:
-            lines.append(tr(f"Вышла новая версия Art Downloader: {app[0]}.",
-                            f"A new Art Downloader version is out: {app[0]}."))
+            lines.append(tr('Вышла новая версия Art Downloader: {version}.',
+                            'A new Art Downloader version is out: {version}.', version=app[0]))
             self.update_action = ("app", app[1])
         if new_gdl:
             if method in ("pip", "pipx"):
-                lines.append(tr(f"Доступен gallery-dl {latest} (сейчас {cur}).",
-                                f"gallery-dl {latest} is available (you have {cur})."))
+                lines.append(tr('Доступен gallery-dl {latest} (сейчас {cur}).',
+                                'gallery-dl {latest} is available (you have {cur}).', latest=latest, cur=cur))
                 self.update_action = self.update_action or ("gdl", latest)
             elif method == "app":
-                lines.append(tr(f"Вышел gallery-dl {latest}. Он придёт с новой "
-                                "версией программы.",
-                                f"gallery-dl {latest} is out. It will come with "
-                                "the next app version."))
+                lines.append(tr('Вышел gallery-dl {latest}. Он придёт с новой версией программы.',
+                                'gallery-dl {latest} is out. It will come with the next app version.', latest=latest))
             else:
-                lines.append(tr(f"Доступен gallery-dl {latest}. Обнови его так же, "
-                                "как устанавливал.",
-                                f"gallery-dl {latest} is available. Update it the "
-                                "way you installed it."))
+                lines.append(tr('Доступен gallery-dl {latest}. Обнови его так же, как устанавливал.',
+                                'gallery-dl {latest} is available. Update it the way you installed it.', latest=latest))
         if "error" in info and not lines:
             lines.append(tr("Не удалось проверить: нет связи с интернетом?",
                             "Couldn't check: no internet connection?"))
@@ -2184,8 +2227,8 @@ class App:
             btn.pack_forget()
             return
         kind, value = self.update_action
-        btn.configure(text=tr(f"Обновить gallery-dl до {value}",
-                              f"Update gallery-dl to {value}") if kind == "gdl"
+        btn.configure(text=tr('Обновить gallery-dl до {value}',
+                              'Update gallery-dl to {value}', value=value) if kind == "gdl"
                       else tr("Скачать новую версию", "Download the new version"))
         btn.pack(side="left", padx=(8, 0))
 
@@ -2236,10 +2279,10 @@ class App:
             self.update_action = None
             self.show_update_button()
             self.var_versions.set(f"{APP_TITLE} {APP_VERSION} · gallery-dl {version}")
-            self.var_update.set(tr(f"gallery-dl обновлён до {version}.",
-                                   f"gallery-dl updated to {version}."))
-            self.log(tr(f"— Готово! gallery-dl {version}.",
-                        f"— Done! gallery-dl {version}."), "ok")
+            self.var_update.set(tr('gallery-dl обновлён до {version}.',
+                                   'gallery-dl updated to {version}.', version=version))
+            self.log(tr('— Готово! gallery-dl {version}.',
+                        '— Done! gallery-dl {version}.', version=version), "ok")
             self.var_status.set(tr("Готово к работе", "Ready"))
         else:
             self.var_update.set(tr("Не удалось обновить — смотри журнал.",
@@ -2248,11 +2291,8 @@ class App:
     def report_risky(self, names):
         if not names:
             return
-        self.log(tr(f"⚠ Среди скачанного есть файлы, которые могут запускать "
-                    f"программы ({len(names)}). Не открывай их, если не "
-                    f"уверен в источнике:",
-                    f"⚠ Some downloads can run programs ({len(names)}). "
-                    f"Don't open them unless you trust the source:"), "err")
+        self.log(tr('⚠ Среди скачанного есть файлы, которые могут запускать программы ({count}). Не открывай их, если не уверен в источнике:',
+                    "⚠ Some downloads can run programs ({count}). Don't open them unless you trust the source:", count=len(names)), "err")
         for name in names:
             self.log("   " + name, "err")
 
@@ -2355,10 +2395,8 @@ class App:
 
                 self.run_process(args + ["--print", COLLECT_FMT, url], on_line)
                 results[i] = found
-                self.emit("log", (tr(f"   {group_name(None, url)}: работ "
-                                     f"{len(found)}",
-                                     f"   {group_name(None, url)}: "
-                                     f"{len(found)} works"), "info"))
+                self.emit("log", (tr('   {name}: работ {works}',
+                                     '   {name}: {works} works', name=group_name(None, url), works=len(found)), "info"))
             return job
 
         self.run_parallel([make_job(i, u) for i, u in enumerate(urls)], n)
@@ -2390,8 +2428,8 @@ class App:
         try:
             args = base_args(browser, cfg_path)
             if user:
-                self.emit("log", (tr(f"Вход в DeviantArt как {user}",
-                                     f"Signing in to DeviantArt as {user}"),
+                self.emit("log", (tr('Вход в DeviantArt как {user}',
+                                     'Signing in to DeviantArt as {user}', user=user),
                                   "info"))
             inc.mkdir(parents=True, exist_ok=True)
 
@@ -2426,8 +2464,8 @@ class App:
                     seen.add(idx)
                     final.append(f"https://www.deviantart.com/view/{idx}")
             final += [u for u in direct if not deviation_id(u)]
-            self.emit("log", (tr(f"Всего работ: {len(final)}",
-                                 f"Total works: {len(final)}"), "info"))
+            self.emit("log", (tr('Всего работ: {works}',
+                                 'Total works: {works}', works=len(final)), "info"))
             if not final:
                 self.emit("log", (tr("Нечего скачивать — ссылки не найдены.",
                                      "Nothing to download — no links found."),
@@ -2440,9 +2478,8 @@ class App:
             # 2. Download in several threads
             archive = dest / ARCHIVE_FILE
             n = min(n_threads, len(final))
-            self.emit("status", tr(f"Скачиваю: {len(final)} ссылок, потоков: {n}…",
-                                   f"Downloading: {len(final)} links, "
-                                   f"{n} threads…"))
+            self.emit("status", tr('Скачиваю: {works} ссылок, потоков: {n}…',
+                                   'Downloading: {works} links, {n} threads…', works=len(final), n=n))
             self.emit("total", len(final))
             self.download_parallel(final, inc, archive, args, n)
             if self.stop_flag.is_set():
@@ -2455,15 +2492,16 @@ class App:
                 if failed:
                     again = retry_links(failed, final)
                     self.emit("retry", len(failed))
-                    self.emit("status", tr(f"Повторяю: {len(again)} ссылок…",
-                                           f"Retrying: {len(again)} links…"))
+                    self.emit("status", tr('Повторяю: {links} ссылок…',
+                                           'Retrying: {links} links…', links=len(again)))
                     self.emit("total", len(again))
                     self.download_parallel(again, inc, archive, args, 1)
                     if self.stop_flag.is_set():
                         result = "stopped"
                         return
         except Exception as e:  # keep the window alive on any error
-            self.emit("log", (tr(f"Ошибка: {e}", f"Error: {e}"), "err"))
+            self.emit("log", (tr('Ошибка: {e}',
+                                 'Error: {e}', e=e), "err"))
             result = "error"
         finally:
             # 4. Put files in order — even after Stop
@@ -2474,8 +2512,8 @@ class App:
                 if do_sort:
                     self.emit("sorted", sort_all_chapters(dest))
             except Exception as e:
-                self.emit("log", (tr(f"Не удалось упорядочить: {e}",
-                                     f"Could not organize files: {e}"), "err"))
+                self.emit("log", (tr('Не удалось упорядочить: {e}',
+                                     'Could not organize files: {e}', e=e), "err"))
             try:
                 os.remove(cfg_path)
             except OSError:
@@ -2547,8 +2585,8 @@ class App:
         if not total:
             return
         done = min(self.works_started, total)
-        self.var_status.set(tr(f"Скачиваю: {done} из {total}",
-                               f"Downloading: {done} of {total}"))
+        self.var_status.set(tr('Скачиваю: {done} из {total}',
+                               'Downloading: {done} of {total}', done=done, total=total))
         self.show_progress(done / total)
 
     def poll_events(self):
@@ -2576,8 +2614,8 @@ class App:
                 elif kind == "total":
                     self.total_works, self.works_started = payload, 0
                 elif kind == "retry":
-                    self.log(tr(f"— Не скачалось {payload}. Пробую ещё раз…",
-                                f"— {payload} failed. Trying again…"), "info")
+                    self.log(tr('— Не скачалось {payload}. Пробую ещё раз…',
+                                '— {payload} failed. Trying again…', payload=payload), "info")
                     self.failed = []
                     self.stats["err"] = 0
                     self.counting_skips = False
@@ -2641,11 +2679,11 @@ class App:
         if result == "ok":
             done, n = self.stats["done"], len(self.failed)
             if n:
-                body = tr(f"Скачано: {files_word(done)}. Не скачалось: {n}.",
-                          f"Downloaded {files_word(done)}. Failed: {n}.")
+                body = tr('Скачано: {files}. Не скачалось: {n}.',
+                          'Downloaded {files}. Failed: {n}.', files=files_word(done), n=n)
             else:
-                body = tr(f"Всё скачалось: {files_word(done)}.",
-                          f"Everything downloaded: {files_word(done)}.")
+                body = tr('Всё скачалось: {files}.',
+                          'Everything downloaded: {files}.', files=files_word(done))
             self.notify_finished(not n, body)
         elif result == "error":
             self.notify_finished(False, tr("Скачивание прервалось с ошибкой.",
@@ -2664,12 +2702,10 @@ class App:
             return
         if self.failed:
             n = len(self.failed)
-            self.var_status.set(tr(f"Готово, но не скачалось: {n}",
-                                   f"Done, but {n} failed"))
-            self.log(tr(f"Не скачались ({n}). Обычно это работы по подписке "
-                        "или 18+ без входа в аккаунт:",
-                        f"Not downloaded ({n}). Usually subscription-only "
-                        "works or 18+ without signing in:"), "err")
+            self.var_status.set(tr('Готово, но не скачалось: {n}',
+                                   'Done, but {n} failed', n=n))
+            self.log(tr('Не скачались ({n}). Обычно это работы по подписке или 18+ без входа в аккаунт:',
+                        'Not downloaded ({n}). Usually subscription-only works or 18+ without signing in:', n=n), "err")
             for name in self.failed:
                 self.log("   " + pretty_name(name), "err")
         else:
@@ -2677,6 +2713,462 @@ class App:
                                    "Done! Everything downloaded."))
             self.log(tr("— Готово! Всё скачалось.",
                         "— Done! Everything downloaded."), "ok")
+
+
+# --------------------------------------------------------------------------
+# Translations: Ukrainian, Spanish, Japanese, Chinese (Simplified).
+# Keyed by the English text at the call site (or by an explicit key such as
+# "tab:Download" where the same English word means different things).
+# Russian and English live next to the code; tests check that every entry
+# here has all languages and the same {fields}.
+# --------------------------------------------------------------------------
+
+TRANSLATIONS = {
+    "don't use a browser": {
+        "uk": "не брати з браузера", "es": "no usar navegador",
+        "ja": "ブラウザーを使わない", "zh": "不使用浏览器"},
+    "automatic": {
+        "uk": "автоматично", "es": "automático", "ja": "自動", "zh": "自动"},
+    "by publication date": {
+        "uk": "за датою публікації", "es": "por fecha de publicación",
+        "ja": "公開日順", "zh": "按发布日期"},
+    "as in the gallery": {
+        "uk": "як у галереї", "es": "como en la galería",
+        "ja": "ギャラリーの順", "zh": "按画廊顺序"},
+    "by title": {
+        "uk": "за назвою", "es": "por título", "ja": "タイトル順", "zh": "按标题"},
+    "Untitled": {
+        "uk": "Без назви", "es": "Sin título", "ja": "無題", "zh": "无标题"},
+    "System": {
+        "uk": "Як у системі", "es": "Como el sistema", "ja": "システム設定",
+        "zh": "跟随系统"},
+    "Light": {"uk": "Світла", "es": "Clara", "ja": "ライト", "zh": "浅色"},
+    "Dark": {"uk": "Темна", "es": "Oscura", "ja": "ダーク", "zh": "深色"},
+    "tab:Download": {
+        "uk": "Завантаження", "es": "Descarga", "ja": "ダウンロード", "zh": "下载"},
+    "Download": {
+        "uk": "Завантажити", "es": "Descargar", "ja": "ダウンロード", "zh": "下载"},
+    "Settings": {
+        "uk": "Налаштування", "es": "Ajustes", "ja": "設定", "zh": "设置"},
+    "Links": {"uk": "Посилання", "es": "Enlaces", "ja": "リンク", "zh": "链接"},
+    "One per line: a folder, chapter, whole series, gallery, profile or single work. Other sites work too.": {
+        "uk": "По одному на рядок: папка, розділ, уся серія, галерея, профіль або окрема робота. Інші сайти теж підходять.",
+        "es": "Uno por línea: una carpeta, capítulo, serie completa, galería, perfil u obra suelta. También sirven otros sitios.",
+        "ja": "1 行に 1 つ：フォルダー、章、シリーズ全体、ギャラリー、プロフィール、または単独の作品。ほかのサイトにも対応しています。",
+        "zh": "每行一个：文件夹、章节、整个系列、画廊、个人主页或单个作品。也支持其他网站。"},
+    "Save to": {"uk": "Куди зберегти", "es": "Guardar en", "ja": "保存先", "zh": "保存到"},
+    "Project name": {
+        "uk": "Назва роботи", "es": "Nombre del proyecto", "ja": "プロジェクト名",
+        "zh": "项目名称"},
+    "Main folder": {
+        "uk": "Основна папка", "es": "Carpeta principal", "ja": "メインフォルダー",
+        "zh": "主文件夹"},
+    "Browse…": {"uk": "Вибрати…", "es": "Elegir…", "ja": "参照…", "zh": "浏览…"},
+    "Open folder": {
+        "uk": "Відкрити папку", "es": "Abrir carpeta", "ja": "フォルダーを開く",
+        "zh": "打开文件夹"},
+    "Organize files": {
+        "uk": "Впорядкувати файли", "es": "Ordenar archivos", "ja": "ファイルを整理",
+        "zh": "整理文件"},
+    "To CBZ / PDF…": {
+        "uk": "У CBZ / PDF…", "es": "A CBZ / PDF…", "ja": "CBZ / PDF へ…",
+        "zh": "导出 CBZ / PDF…"},
+    "Connect DeviantArt": {
+        "uk": "Підключити DeviantArt", "es": "Conectar DeviantArt",
+        "ja": "DeviantArt に接続", "zh": "连接 DeviantArt"},
+    "Other ways to sign in (optional)": {
+        "uk": "Інші способи входу (необов'язково)",
+        "es": "Otras formas de iniciar sesión (opcional)",
+        "ja": "その他のログイン方法（任意）", "zh": "其他登录方式（可选）"},
+    "Username": {"uk": "Логін", "es": "Usuario", "ja": "ユーザー名", "zh": "用户名"},
+    "Password (not stored)": {
+        "uk": "Пароль (не зберігається)", "es": "Contraseña (no se guarda)",
+        "ja": "パスワード（保存されません）", "zh": "密码（不会保存）"},
+    "Cookies from browser:": {
+        "uk": "Вхід із браузера:", "es": "Sesión del navegador:",
+        "ja": "ブラウザーのログイン情報：", "zh": "浏览器登录信息："},
+    "File order": {
+        "uk": "Порядок файлів", "es": "Orden de los archivos", "ja": "ファイルの順番",
+        "zh": "文件顺序"},
+    "Automatic: by the number in the title (Part 2 before Part 10) when works have one, otherwise by date.": {
+        "uk": "Автоматично: за номером у назві (Part 2 раніше за Part 10), якщо він є, інакше за датою.",
+        "es": "Automático: por el número del título (Part 2 antes que Part 10) si lo tiene; si no, por fecha.",
+        "ja": "自動：タイトルに番号があればその順（Part 2 は Part 10 より前）、なければ日付順。",
+        "zh": "自动：如果标题中有编号就按编号排序（Part 2 在 Part 10 之前），否则按日期。"},
+    "If one folder has several chapters, split into Chapter 01, 02 …": {
+        "uk": "Якщо в одній папці кілька розділів — розкласти по Chapter 01, 02 …",
+        "es": "Si una carpeta tiene varios capítulos, separarlos en Chapter 01, 02 …",
+        "ja": "1 つのフォルダーに複数の章があれば Chapter 01, 02 … に分ける",
+        "zh": "如果一个文件夹里有多个章节，拆分为 Chapter 01、02 …"},
+    "Downloading": {
+        "uk": "Завантаження", "es": "Descargas", "ja": "ダウンロード", "zh": "下载"},
+    "At the same time:": {
+        "uk": "Одночасно:", "es": "A la vez:", "ja": "同時に：", "zh": "同时下载："},
+    "3 is optimal": {
+        "uk": "3 — оптимально", "es": "3 es lo ideal", "ja": "3 がおすすめ",
+        "zh": "建议 3 个"},
+    "Retry anything that failed the first time": {
+        "uk": "Повторювати те, що не завантажилося з першого разу",
+        "es": "Reintentar lo que falló la primera vez",
+        "ja": "失敗したものをもう一度試す", "zh": "重试第一次失败的文件"},
+    "Appearance": {"uk": "Вигляд", "es": "Apariencia", "ja": "外観", "zh": "外观"},
+    "Language:": {"uk": "Мова:", "es": "Idioma:", "ja": "言語：", "zh": "语言："},
+    "Theme:": {"uk": "Тема:", "es": "Tema:", "ja": "テーマ：", "zh": "主题："},
+    "Applications menu": {
+        "uk": "Меню застосунків", "es": "Menú de aplicaciones",
+        "ja": "アプリケーションメニュー", "zh": "应用程序菜单"},
+    "Notifications and updates": {
+        "uk": "Сповіщення та оновлення", "es": "Notificaciones y actualizaciones",
+        "ja": "通知とアップデート", "zh": "通知与更新"},
+    "Notify me when a download finishes (if the window is in the background)": {
+        "uk": "Сповіщати, коли завантаження завершиться (якщо вікно у фоні)",
+        "es": "Avisarme cuando termine una descarga (si la ventana está en segundo plano)",
+        "ja": "ダウンロード完了を通知する（ウィンドウが裏にあるとき）",
+        "zh": "下载完成时通知我（窗口在后台时）"},
+    "Check for updates once a day": {
+        "uk": "Перевіряти оновлення раз на день",
+        "es": "Buscar actualizaciones una vez al día",
+        "ja": "1 日 1 回アップデートを確認", "zh": "每天检查一次更新"},
+    "Check for updates": {
+        "uk": "Перевірити оновлення", "es": "Buscar actualizaciones",
+        "ja": "アップデートを確認", "zh": "检查更新"},
+    "Will be saved to: ": {
+        "uk": "Збережеться в: ", "es": "Se guardará en: ", "ja": "保存先：",
+        "zh": "将保存到："},
+    "Ready": {"uk": "Готово до роботи", "es": "Listo", "ja": "準備完了", "zh": "就绪"},
+    "You can change the language after the download finishes.": {
+        "uk": "Мову можна змінити, коли завантаження завершиться.",
+        "es": "Podrás cambiar el idioma cuando termine la descarga.",
+        "ja": "言語はダウンロードが終わってから変更できます。",
+        "zh": "下载完成后才能更改语言。"},
+    "✔ Connected — 18+ works download in full quality.": {
+        "uk": "✔ Підключено — роботи 18+ завантажуються в повній якості.",
+        "es": "✔ Conectado: las obras 18+ se descargan en calidad completa.",
+        "ja": "✔ 接続済み — 18+ の作品もフル画質でダウンロードできます。",
+        "zh": "✔ 已连接 — 18+ 作品可下载完整画质。"},
+    "Needed once for 18+ works: DeviantArt opens, click “Authorize”. The app never stores your password.": {
+        "uk": "Потрібно один раз для робіт 18+: відкриється DeviantArt, натисни «Authorize». Пароль програма не зберігає.",
+        "es": "Necesario una vez para obras 18+: se abre DeviantArt, pulsa «Authorize». La app nunca guarda tu contraseña.",
+        "ja": "18+ の作品には 1 回だけ必要です。DeviantArt が開いたら「Authorize」を押してください。パスワードは保存されません。",
+        "zh": "下载 18+ 作品需要连接一次：打开 DeviantArt 后点击“Authorize”。本应用不会保存你的密码。"},
+    "Install it: {cmd}": {
+        "uk": "Встанови його: {cmd}", "es": "Instálalo: {cmd}",
+        "ja": "インストールしてください：{cmd}", "zh": "请安装：{cmd}"},
+    "gallery-dl is built into the app": {
+        "uk": "gallery-dl вбудовано в програму", "es": "gallery-dl viene incluido en la app",
+        "ja": "gallery-dl はアプリに内蔵されています", "zh": "gallery-dl 已内置在应用中"},
+    "gallery-dl found: {where}": {
+        "uk": "gallery-dl знайдено: {where}", "es": "gallery-dl encontrado: {where}",
+        "ja": "gallery-dl を検出：{where}", "zh": "已找到 gallery-dl：{where}"},
+    "gallery-dl not found! ": {
+        "uk": "gallery-dl не знайдено! ", "es": "¡No se encontró gallery-dl! ",
+        "ja": "gallery-dl が見つかりません！", "zh": "未找到 gallery-dl！"},
+    "downloaded {done} · skipped {skipped} · errors {errors}": {
+        "uk": "завантажено {done} · пропущено {skipped} · помилок {errors}",
+        "es": "descargados {done} · omitidos {skipped} · errores {errors}",
+        "ja": "完了 {done} · スキップ {skipped} · エラー {errors}",
+        "zh": "已下载 {done} · 跳过 {skipped} · 错误 {errors}"},
+    "Stop": {"uk": "Стоп", "es": "Detener", "ja": "停止", "zh": "停止"},
+    "gallery-dl not found.\n": {
+        "uk": "gallery-dl не знайдено.\n", "es": "No se encontró gallery-dl.\n",
+        "ja": "gallery-dl が見つかりません。\n", "zh": "未找到 gallery-dl。\n"},
+    "Paste at least one link.": {
+        "uk": "Встав хоча б одне посилання.", "es": "Pega al menos un enlace.",
+        "ja": "リンクを 1 つ以上貼り付けてください。", "zh": "请至少粘贴一个链接。"},
+    "Sign-in needs both username and password.\nOr leave both fields empty.": {
+        "uk": "Для входу потрібні і логін, і пароль.\nАбо залиш обидва поля порожніми.",
+        "es": "Para iniciar sesión hacen falta usuario y contraseña.\nO deja ambos campos vacíos.",
+        "ja": "ログインにはユーザー名とパスワードの両方が必要です。\nまたは両方とも空欄にしてください。",
+        "zh": "登录需要同时填写用户名和密码。\n或者两个都留空。"},
+    "— Starting: {links} links → {dest}": {
+        "uk": "— Починаю: посилань {links} → {dest}",
+        "es": "— Empezando: {links} enlaces → {dest}",
+        "ja": "— 開始：リンク {links} 件 → {dest}",
+        "zh": "— 开始：{links} 个链接 → {dest}"},
+    "gallery-dl not found.": {
+        "uk": "gallery-dl не знайдено.", "es": "No se encontró gallery-dl.",
+        "ja": "gallery-dl が見つかりません。", "zh": "未找到 gallery-dl。"},
+    "Waiting for approval in the browser…": {
+        "uk": "Чекаю на дозвіл у браузері…", "es": "Esperando la autorización en el navegador…",
+        "ja": "ブラウザーでの許可を待っています…", "zh": "正在等待浏览器中的授权…"},
+    "— Connecting DeviantArt. A DeviantArt page will open in your browser: sign in and click “Authorize”.": {
+        "uk": "— Підключаю DeviantArt. У браузері відкриється сторінка DeviantArt: увійди й натисни «Authorize».",
+        "es": "— Conectando DeviantArt. Se abrirá una página de DeviantArt en tu navegador: inicia sesión y pulsa «Authorize».",
+        "ja": "— DeviantArt に接続しています。ブラウザーで DeviantArt のページが開くので、ログインして「Authorize」を押してください。",
+        "zh": "— 正在连接 DeviantArt。浏览器会打开 DeviantArt 页面：登录后点击“Authorize”。"},
+    "If the browser didn't open, open this link manually:": {
+        "uk": "Якщо браузер не відкрився, відкрий посилання вручну:",
+        "es": "Si no se abrió el navegador, abre este enlace a mano:",
+        "ja": "ブラウザーが開かない場合は、このリンクを手動で開いてください：",
+        "zh": "如果浏览器没有打开，请手动打开此链接："},
+    "Error: {e}": {"uk": "Помилка: {e}", "es": "Error: {e}", "ja": "エラー：{e}",
+                   "zh": "错误：{e}"},
+    "Stopping…": {"uk": "Зупиняю…", "es": "Deteniendo…", "ja": "停止しています…",
+                  "zh": "正在停止…"},
+    "Folder doesn't exist yet:\n{folder}": {
+        "uk": "Папки ще немає:\n{folder}", "es": "La carpeta aún no existe:\n{folder}",
+        "ja": "フォルダーがまだありません：\n{folder}", "zh": "文件夹还不存在：\n{folder}"},
+    "Art Downloader is in your applications menu. If you move the app file, the entry updates itself on the next start.": {
+        "uk": "Art Downloader є в меню застосунків. Якщо перемістиш файл програми, значок оновиться сам під час наступного запуску.",
+        "es": "Art Downloader está en tu menú de aplicaciones. Si mueves el archivo de la app, la entrada se actualiza sola al volver a abrirla.",
+        "ja": "Art Downloader はアプリケーションメニューにあります。アプリのファイルを移動しても、次に起動したときに自動で更新されます。",
+        "zh": "Art Downloader 已在应用程序菜单中。如果移动了应用文件，下次启动时菜单项会自动更新。"},
+    "Remove from the menu": {
+        "uk": "Прибрати з меню", "es": "Quitar del menú", "ja": "メニューから削除",
+        "zh": "从菜单中移除"},
+    "Add the app to your menu to start it like any other app (Super key → “Art”).": {
+        "uk": "Додай програму в меню, щоб запускати її як звичайний застосунок (клавіша Super → «Art»).",
+        "es": "Añade la app a tu menú para abrirla como cualquier otra (tecla Super → «Art»).",
+        "ja": "メニューに追加すると、ほかのアプリと同じように起動できます（Super キー →「Art」）。",
+        "zh": "将应用添加到菜单，就能像其他应用一样启动（Super 键 →“Art”）。"},
+    "Add to the applications menu": {
+        "uk": "Додати в меню застосунків", "es": "Añadir al menú de aplicaciones",
+        "ja": "アプリケーションメニューに追加", "zh": "添加到应用程序菜单"},
+    "Removed from the applications menu.": {
+        "uk": "Прибрано з меню застосунків.", "es": "Quitada del menú de aplicaciones.",
+        "ja": "アプリケーションメニューから削除しました。", "zh": "已从应用程序菜单中移除。"},
+    "Added to the applications menu.": {
+        "uk": "Додано в меню застосунків.", "es": "Añadida al menú de aplicaciones.",
+        "ja": "アプリケーションメニューに追加しました。", "zh": "已添加到应用程序菜单。"},
+    "That didn't work: {e}": {
+        "uk": "Не вийшло: {e}", "es": "No funcionó: {e}", "ja": "うまくいきませんでした：{e}",
+        "zh": "操作失败：{e}"},
+    "Add Art Downloader to your applications menu?\n\nThen you can start it like any other app. You can also do this later in Settings.": {
+        "uk": "Додати Art Downloader у меню застосунків?\n\nТоді його можна буде запускати як звичайну програму. Це можна зробити й пізніше в Налаштуваннях.",
+        "es": "¿Añadir Art Downloader a tu menú de aplicaciones?\n\nAsí podrás abrirla como cualquier otra app. También puedes hacerlo más tarde en Ajustes.",
+        "ja": "Art Downloader をアプリケーションメニューに追加しますか？\n\nほかのアプリと同じように起動できるようになります。あとで設定から追加することもできます。",
+        "zh": "要将 Art Downloader 添加到应用程序菜单吗？\n\n这样就能像其他应用一样启动它。之后也可以在设置中添加。"},
+    "No downloaded chapters in this folder yet:\n{folder}": {
+        "uk": "У папці ще немає завантажених розділів:\n{folder}",
+        "es": "Todavía no hay capítulos descargados en esta carpeta:\n{folder}",
+        "ja": "このフォルダーにはまだダウンロードした章がありません：\n{folder}",
+        "zh": "此文件夹中还没有已下载的章节：\n{folder}"},
+    "Export to CBZ / PDF": {
+        "uk": "Експорт у CBZ / PDF", "es": "Exportar a CBZ / PDF",
+        "ja": "CBZ / PDF に書き出し", "zh": "导出为 CBZ / PDF"},
+    "Books: {books}": {"uk": "Книг: {books}", "es": "Libros: {books}",
+                       "ja": "冊数：{books}", "zh": "书籍：{books}"},
+    "One book per chapter (Chapter NN folder) or per folder. Pages follow the file order.": {
+        "uk": "Одна книга на розділ (папку Chapter NN) або на папку. Сторінки — у тому ж порядку, що й файли.",
+        "es": "Un libro por capítulo (carpeta Chapter NN) o por carpeta. Las páginas siguen el orden de los archivos.",
+        "ja": "章（Chapter NN フォルダー）またはフォルダーごとに 1 冊。ページはファイルと同じ順番です。",
+        "zh": "每个章节（Chapter NN 文件夹）或每个文件夹生成一本。页面顺序与文件顺序相同。"},
+    "…and {more} more": {"uk": "…і ще {more}", "es": "…y {more} más",
+                         "ja": "…ほか {more} 冊", "zh": "…还有 {more} 本"},
+    "CBZ — lossless": {"uk": "CBZ — без втрат", "es": "CBZ: sin pérdida",
+                       "ja": "CBZ — 劣化なし", "zh": "CBZ — 无损"},
+    "PDF — opens anywhere": {"uk": "PDF — відкривається всюди",
+                             "es": "PDF: se abre en todas partes",
+                             "ja": "PDF — どこでも開ける", "zh": "PDF — 随处可打开"},
+    "Create": {"uk": "Створити", "es": "Crear", "ja": "作成", "zh": "创建"},
+    "— Exporting to {fmt}…": {
+        "uk": "— Експорт у {fmt}…", "es": "— Exportando a {fmt}…",
+        "ja": "— {fmt} に書き出しています…", "zh": "— 正在导出为 {fmt}…"},
+    "Exporting: {i} of {n}": {
+        "uk": "Експорт: {i} з {n}", "es": "Exportando: {i} de {n}",
+        "ja": "書き出し中：{i} / {n}", "zh": "正在导出：{i} / {n}"},
+    "Done: {books} books": {
+        "uk": "Готово: книг {books}", "es": "Listo: {books} libros",
+        "ja": "完了：{books} 冊", "zh": "完成：{books} 本"},
+    "— Done! The books are in the {folder} folder.": {
+        "uk": "— Готово! Книги в папці {folder}.",
+        "es": "— ¡Listo! Los libros están en la carpeta {folder}.",
+        "ja": "— 完了！本は {folder} フォルダーにあります。",
+        "zh": "— 完成！书籍保存在 {folder} 文件夹中。"},
+    "Export finished: {books} books.": {
+        "uk": "Експорт готовий: книг {books}.", "es": "Exportación terminada: {books} libros.",
+        "ja": "書き出しが完了しました：{books} 冊。", "zh": "导出完成：{books} 本。"},
+    "Export failed — see the log": {
+        "uk": "Помилка експорту — дивись журнал", "es": "Falló la exportación: mira el registro",
+        "ja": "書き出しに失敗しました — ログを確認してください", "zh": "导出失败 — 请查看日志"},
+    "Could not make a book: {result}": {
+        "uk": "Не вдалося зробити книгу: {result}", "es": "No se pudo crear el libro: {result}",
+        "ja": "本を作成できませんでした：{result}", "zh": "无法生成书籍：{result}"},
+    "Checking…": {"uk": "Перевіряю…", "es": "Comprobando…", "ja": "確認しています…",
+                  "zh": "正在检查…"},
+    "A new Art Downloader version is out: {version}.": {
+        "uk": "Вийшла нова версія Art Downloader: {version}.",
+        "es": "Hay una nueva versión de Art Downloader: {version}.",
+        "ja": "Art Downloader の新しいバージョンが出ました：{version}。",
+        "zh": "Art Downloader 有新版本：{version}。"},
+    "gallery-dl {latest} is available (you have {cur}).": {
+        "uk": "Доступний gallery-dl {latest} (зараз {cur}).",
+        "es": "gallery-dl {latest} está disponible (tienes {cur}).",
+        "ja": "gallery-dl {latest} が利用できます（現在 {cur}）。",
+        "zh": "gallery-dl {latest} 已发布（当前 {cur}）。"},
+    "gallery-dl {latest} is out. It will come with the next app version.": {
+        "uk": "Вийшов gallery-dl {latest}. Він прийде з новою версією програми.",
+        "es": "Salió gallery-dl {latest}. Llegará con la próxima versión de la app.",
+        "ja": "gallery-dl {latest} が出ました。次のアプリのバージョンに含まれます。",
+        "zh": "gallery-dl {latest} 已发布，将随下一个应用版本提供。"},
+    "gallery-dl {latest} is available. Update it the way you installed it.": {
+        "uk": "Доступний gallery-dl {latest}. Онови його так само, як встановлював.",
+        "es": "gallery-dl {latest} está disponible. Actualízalo igual que lo instalaste.",
+        "ja": "gallery-dl {latest} が利用できます。インストールしたときと同じ方法で更新してください。",
+        "zh": "gallery-dl {latest} 已发布。请用安装时的方式更新。"},
+    "Couldn't check: no internet connection?": {
+        "uk": "Не вдалося перевірити: немає зв'язку з інтернетом?",
+        "es": "No se pudo comprobar: ¿no hay conexión a internet?",
+        "ja": "確認できませんでした。インターネットに接続していますか？",
+        "zh": "无法检查：是否没有网络连接？"},
+    "Everything is up to date.": {
+        "uk": "Усе оновлено.", "es": "Todo está al día.", "ja": "すべて最新です。",
+        "zh": "已是最新版本。"},
+    "An update is available — Settings → Notifications and updates.": {
+        "uk": "Доступне оновлення — Налаштування → Сповіщення та оновлення.",
+        "es": "Hay una actualización: Ajustes → Notificaciones y actualizaciones.",
+        "ja": "アップデートがあります — 設定 → 通知とアップデート。",
+        "zh": "有可用更新 — 设置 → 通知与更新。"},
+    "Update gallery-dl to {value}": {
+        "uk": "Оновити gallery-dl до {value}", "es": "Actualizar gallery-dl a {value}",
+        "ja": "gallery-dl を {value} に更新", "zh": "将 gallery-dl 更新到 {value}"},
+    "Download the new version": {
+        "uk": "Завантажити нову версію", "es": "Descargar la nueva versión",
+        "ja": "新しいバージョンをダウンロード", "zh": "下载新版本"},
+    "Updating gallery-dl…": {
+        "uk": "Оновлюю gallery-dl…", "es": "Actualizando gallery-dl…",
+        "ja": "gallery-dl を更新しています…", "zh": "正在更新 gallery-dl…"},
+    "— Updating gallery-dl…": {
+        "uk": "— Оновлюю gallery-dl…", "es": "— Actualizando gallery-dl…",
+        "ja": "— gallery-dl を更新しています…", "zh": "— 正在更新 gallery-dl…"},
+    "gallery-dl updated to {version}.": {
+        "uk": "gallery-dl оновлено до {version}.", "es": "gallery-dl actualizado a {version}.",
+        "ja": "gallery-dl を {version} に更新しました。", "zh": "gallery-dl 已更新到 {version}。"},
+    "— Done! gallery-dl {version}.": {
+        "uk": "— Готово! gallery-dl {version}.", "es": "— ¡Listo! gallery-dl {version}.",
+        "ja": "— 完了！gallery-dl {version}。", "zh": "— 完成！gallery-dl {version}。"},
+    "Update failed — see the log.": {
+        "uk": "Не вдалося оновити — дивись журнал.", "es": "Falló la actualización: mira el registro.",
+        "ja": "更新に失敗しました — ログを確認してください。", "zh": "更新失败 — 请查看日志。"},
+    "⚠ Some downloads can run programs ({count}). Don't open them unless you trust the source:": {
+        "uk": "⚠ Серед завантаженого є файли, які можуть запускати програми ({count}). Не відкривай їх, якщо не впевнений у джерелі:",
+        "es": "⚠ Algunas descargas pueden ejecutar programas ({count}). No las abras si no confías en la fuente:",
+        "ja": "⚠ プログラムを実行できるファイルがあります（{count}）。信頼できない場合は開かないでください：",
+        "zh": "⚠ 部分下载的文件可以运行程序（{count}）。如果不信任来源，请不要打开："},
+    "Organized into folders: ": {
+        "uk": "Розкладено по папках: ", "es": "Organizados en carpetas: ",
+        "ja": "フォルダーに整理：", "zh": "已整理到文件夹："},
+    "main folder": {"uk": "основна папка", "es": "carpeta principal",
+                    "ja": "メインフォルダー", "zh": "主文件夹"},
+    "Renumbered into order: ": {
+        "uk": "Перенумеровано по порядку: ", "es": "Renumerados en orden: ",
+        "ja": "順番に番号を振り直し：", "zh": "已按顺序重新编号："},
+    "Split into chapters: ": {
+        "uk": "Розкладено по розділах: ", "es": "Separados en capítulos: ",
+        "ja": "章ごとに分割：", "zh": "已按章节拆分："},
+    "A download is still running. Stop and quit?": {
+        "uk": "Завантаження ще триває. Зупинити й вийти?",
+        "es": "Todavía hay una descarga en curso. ¿Detenerla y salir?",
+        "ja": "ダウンロード中です。停止して終了しますか？",
+        "zh": "下载仍在进行。要停止并退出吗？"},
+    "   {name}: {works} works": {
+        "uk": "   {name}: робіт {works}", "es": "   {name}: {works} obras",
+        "ja": "   {name}：作品 {works} 件", "zh": "   {name}：{works} 个作品"},
+    "Signing in to DeviantArt as {user}": {
+        "uk": "Вхід у DeviantArt як {user}", "es": "Iniciando sesión en DeviantArt como {user}",
+        "ja": "{user} として DeviantArt にログイン", "zh": "以 {user} 身份登录 DeviantArt"},
+    "Collecting the list of works…": {
+        "uk": "Збираю список робіт…", "es": "Reuniendo la lista de obras…",
+        "ja": "作品の一覧を取得しています…", "zh": "正在获取作品列表…"},
+    "Single works": {"uk": "Окремі роботи", "es": "Obras sueltas", "ja": "単独の作品",
+                     "zh": "单个作品"},
+    "Total works: {works}": {"uk": "Усього робіт: {works}", "es": "Obras en total: {works}",
+                             "ja": "作品の合計：{works}", "zh": "作品总数：{works}"},
+    "Nothing to download — no links found.": {
+        "uk": "Нічого завантажувати — посилань не знайдено.",
+        "es": "Nada que descargar: no se encontraron enlaces.",
+        "ja": "ダウンロードするものがありません — リンクが見つかりません。",
+        "zh": "没有可下载的内容 — 未找到链接。"},
+    "Downloading: {works} links, {n} threads…": {
+        "uk": "Завантажую: посилань {works}, потоків {n}…",
+        "es": "Descargando: {works} enlaces, {n} a la vez…",
+        "ja": "ダウンロード中：リンク {works} 件、同時 {n}…",
+        "zh": "正在下载：{works} 个链接，{n} 个线程…"},
+    "Retrying: {links} links…": {
+        "uk": "Повторюю: посилань {links}…", "es": "Reintentando: {links} enlaces…",
+        "ja": "再試行中：リンク {links} 件…", "zh": "正在重试：{links} 个链接…"},
+    "Could not organize files: {e}": {
+        "uk": "Не вдалося впорядкувати: {e}", "es": "No se pudieron ordenar los archivos: {e}",
+        "ja": "ファイルを整理できませんでした：{e}", "zh": "无法整理文件：{e}"},
+    "   ↳ Sign-in failed. Check username and password. If DeviantArt asks for a captcha, click “Connect DeviantArt”.": {
+        "uk": "   ↳ Не вдалося увійти. Перевір логін і пароль. Якщо DeviantArt просить капчу — натисни «Підключити DeviantArt».",
+        "es": "   ↳ No se pudo iniciar sesión. Revisa usuario y contraseña. Si DeviantArt pide un captcha, pulsa «Conectar DeviantArt».",
+        "ja": "   ↳ ログインできませんでした。ユーザー名とパスワードを確認してください。キャプチャが表示される場合は「DeviantArt に接続」を押してください。",
+        "zh": "   ↳ 登录失败。请检查用户名和密码。如果 DeviantArt 要求验证码，请点击“连接 DeviantArt”。"},
+    "   ↳ Not signed in with this browser. Pick another browser or click “Connect DeviantArt”.": {
+        "uk": "   ↳ У цьому браузері немає входу. Вибери інший браузер або натисни «Підключити DeviantArt».",
+        "es": "   ↳ No hay sesión iniciada en este navegador. Elige otro o pulsa «Conectar DeviantArt».",
+        "ja": "   ↳ このブラウザーではログインしていません。別のブラウザーを選ぶか「DeviantArt に接続」を押してください。",
+        "zh": "   ↳ 此浏览器中没有登录信息。请选择其他浏览器或点击“连接 DeviantArt”。"},
+    "   ↳ The site refuses the full image. For 18+ click “Connect DeviantArt”, then “Download” again.": {
+        "uk": "   ↳ Сайт не віддає повне зображення. Для 18+ натисни «Підключити DeviantArt», потім знову «Завантажити».",
+        "es": "   ↳ El sitio no entrega la imagen completa. Para 18+ pulsa «Conectar DeviantArt» y luego «Descargar» otra vez.",
+        "ja": "   ↳ サイトがフル画像を渡してくれません。18+ の場合は「DeviantArt に接続」を押してから、もう一度「ダウンロード」してください。",
+        "zh": "   ↳ 网站拒绝提供完整图片。18+ 作品请先点击“连接 DeviantArt”，再重新“下载”。"},
+    "Downloading: {done} of {total}": {
+        "uk": "Завантажую: {done} з {total}", "es": "Descargando: {done} de {total}",
+        "ja": "ダウンロード中：{done} / {total}", "zh": "正在下载：{done} / {total}"},
+    "— {payload} failed. Trying again…": {
+        "uk": "— Не завантажилося: {payload}. Пробую ще раз…",
+        "es": "— Fallaron {payload}. Intentando de nuevo…",
+        "ja": "— {payload} 件が失敗しました。もう一度試しています…",
+        "zh": "— {payload} 个失败。正在重试…"},
+    "DeviantArt connected!": {
+        "uk": "DeviantArt підключено!", "es": "¡DeviantArt conectado!",
+        "ja": "DeviantArt に接続しました！", "zh": "DeviantArt 已连接！"},
+    "— Done! DeviantArt is connected. You can now download, including 18+ works.": {
+        "uk": "— Готово! DeviantArt підключено. Тепер можна завантажувати, зокрема роботи 18+.",
+        "es": "— ¡Listo! DeviantArt está conectado. Ya puedes descargar, también obras 18+.",
+        "ja": "— 完了！DeviantArt に接続しました。18+ の作品もダウンロードできます。",
+        "zh": "— 完成！DeviantArt 已连接。现在可以下载了，包括 18+ 作品。"},
+    "Could not connect DeviantArt": {
+        "uk": "Не вдалося підключити DeviantArt", "es": "No se pudo conectar DeviantArt",
+        "ja": "DeviantArt に接続できませんでした", "zh": "无法连接 DeviantArt"},
+    "— Connection didn't finish. Try again and click “Authorize” in the browser.": {
+        "uk": "— Підключення не завершилося. Спробуй ще раз і натисни «Authorize» у браузері.",
+        "es": "— La conexión no terminó. Vuelve a intentarlo y pulsa «Authorize» en el navegador.",
+        "ja": "— 接続が完了しませんでした。もう一度試して、ブラウザーで「Authorize」を押してください。",
+        "zh": "— 连接未完成。请重试，并在浏览器中点击“Authorize”。"},
+    "done": {"uk": "готово", "es": "listo", "ja": "完了", "zh": "完成"},
+    "Downloaded {files}. Failed: {n}.": {
+        "uk": "Завантажено: {files}. Не завантажилося: {n}.",
+        "es": "Descargados {files}. Fallaron: {n}.",
+        "ja": "{files}をダウンロードしました。失敗：{n}。",
+        "zh": "已下载 {files}。失败：{n}。"},
+    "Everything downloaded: {files}.": {
+        "uk": "Усе завантажено: {files}.", "es": "Todo descargado: {files}.",
+        "ja": "すべてダウンロードしました：{files}。", "zh": "全部下载完成：{files}。"},
+    "The download stopped with an error.": {
+        "uk": "Завантаження перервалося з помилкою.", "es": "La descarga se detuvo por un error.",
+        "ja": "エラーでダウンロードが止まりました。", "zh": "下载因错误而中断。"},
+    "Stopped. Click “Download” to resume.": {
+        "uk": "Зупинено. Натисни «Завантажити» — продовжить з того ж місця.",
+        "es": "Detenido. Pulsa «Descargar» para continuar.",
+        "ja": "停止しました。「ダウンロード」を押すと続きから再開します。",
+        "zh": "已停止。点击“下载”可继续。"},
+    "— Stopped. Running again downloads only what's missing.": {
+        "uk": "— Зупинено. Повторний запуск завантажить лише те, чого бракує.",
+        "es": "— Detenido. Al volver a empezar solo se descarga lo que falta.",
+        "ja": "— 停止しました。もう一度実行すると足りないものだけをダウンロードします。",
+        "zh": "— 已停止。再次运行只会下载缺少的文件。"},
+    "Error — see the log": {
+        "uk": "Помилка — дивись журнал", "es": "Error: mira el registro",
+        "ja": "エラー — ログを確認してください", "zh": "错误 — 请查看日志"},
+    "Done, but {n} failed": {
+        "uk": "Готово, але не завантажилося: {n}", "es": "Listo, pero fallaron {n}",
+        "ja": "完了。ただし {n} 件失敗しました", "zh": "完成，但有 {n} 个失败"},
+    "Not downloaded ({n}). Usually subscription-only works or 18+ without signing in:": {
+        "uk": "Не завантажилися ({n}). Зазвичай це роботи за підпискою або 18+ без входу в акаунт:",
+        "es": "Sin descargar ({n}). Suelen ser obras solo para suscriptores o 18+ sin iniciar sesión:",
+        "ja": "ダウンロードできなかったもの（{n}）。たいていはサブスク限定か、ログインしていない 18+ の作品です：",
+        "zh": "未下载（{n}）。通常是订阅专享作品，或未登录时的 18+ 作品："},
+    "Done! Everything downloaded.": {
+        "uk": "Готово! Усе завантажено.", "es": "¡Listo! Todo descargado.",
+        "ja": "完了！すべてダウンロードしました。", "zh": "完成！全部下载完毕。"},
+    "— Done! Everything downloaded.": {
+        "uk": "— Готово! Усе завантажено.", "es": "— ¡Listo! Todo descargado.",
+        "ja": "— 完了！すべてダウンロードしました。", "zh": "— 完成！全部下载完毕。"},
+}
 
 
 def main():

@@ -22,14 +22,61 @@ def english():
 
 def test_detect_lang():
     assert a.detect_lang({"LANG": "ru_RU.UTF-8"}) == "ru"
-    assert a.detect_lang({"LANG": "uk_UA.UTF-8"}) == "ru"
+    assert a.detect_lang({"LANG": "uk_UA.UTF-8"}) == "uk"
+    assert a.detect_lang({"LANG": "be_BY.UTF-8"}) == "ru"
+    assert a.detect_lang({"LANG": "es_MX.UTF-8"}) == "es"
+    assert a.detect_lang({"LANG": "ja_JP.UTF-8"}) == "ja"
+    assert a.detect_lang({"LANG": "zh_CN.UTF-8"}) == "zh"
     assert a.detect_lang({"LANG": "sv_SE.UTF-8"}) == "en"
     assert a.detect_lang({"LANGUAGE": "en_US", "LANG": "ru_RU.UTF-8"}) == "en"
+    assert a.detect_lang({"LANG": "C.UTF-8"}, windows_lang_id=0) == "en"
     assert a.detect_lang({}, windows_lang_id=0) == "en"
-    # Windows UI language ids: 0x0419 ru-RU, 0x0422 uk-UA, 0x0409 en-US
-    assert a.detect_lang({}, windows_lang_id=0x0419) == "ru"
-    assert a.detect_lang({}, windows_lang_id=0x0422) == "ru"
-    assert a.detect_lang({}, windows_lang_id=0x0409) == "en"
+    # Windows UI language ids
+    for lang_id, want in [(0x0419, "ru"), (0x0422, "uk"), (0x0409, "en"),
+                          (0x0C0A, "es"), (0x0411, "ja"), (0x0804, "zh"),
+                          (0x041D, "en")]:
+        assert a.detect_lang({}, windows_lang_id=lang_id) == want, hex(lang_id)
+
+
+def test_every_text_is_translated():
+    import ast
+    import re
+    src = (Path(a.__file__)).read_text(encoding="utf-8")
+    keys = set()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "tr":
+            en = ast.literal_eval(node.args[1])
+            key = [k.value.value for k in node.keywords if k.arg == "_key"]
+            keys.add(key[0] if key else en)
+    assert keys == set(a.TRANSLATIONS), (keys ^ set(a.TRANSLATIONS))
+    fields = lambda s: sorted(re.findall(r"\{(\w+)\}", s))
+    for key, langs in a.TRANSLATIONS.items():
+        english = key.split(":", 1)[1] if key.startswith("tab:") else key
+        for lang in ("uk", "es", "ja", "zh"):
+            assert langs.get(lang), (key, lang)
+            assert fields(langs[lang]) == fields(english), (key, lang)
+
+
+def test_tr_in_every_language():
+    for lang, want in [("en", "Downloading: 3 of 7"), ("ru", "Скачиваю: 3 из 7"),
+                       ("uk", "Завантажую: 3 з 7"), ("es", "Descargando: 3 de 7"),
+                       ("ja", "ダウンロード中：3 / 7"), ("zh", "正在下载：3 / 7")]:
+        a.set_lang(lang)
+        assert a.tr("Скачиваю: {done} из {total}", "Downloading: {done} of {total}",
+                    done=3, total=7) == want
+    a.set_lang("uk")
+    assert a.tr("Загрузка", "Download", _key="tab:Download") == "Завантаження"
+    assert a.tr("Скачать", "Download") == "Завантажити"
+    assert a.tr("нет", "not translated yet") == "not translated yet"   # falls back
+
+
+def test_files_word_all_languages():
+    cases = {"uk": ["1 файл", "3 файли", "5 файлів"], "es": ["1 archivo", "3 archivos", "5 archivos"],
+             "ja": ["1 個のファイル", "3 個のファイル", "5 個のファイル"],
+             "zh": ["1 个文件", "3 个文件", "5 个文件"]}
+    for lang, want in cases.items():
+        a.set_lang(lang)
+        assert [a.files_word(n) for n in (1, 3, 5)] == want
 
 
 def test_safe_name_windows_characters():
