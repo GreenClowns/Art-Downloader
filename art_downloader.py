@@ -232,6 +232,20 @@ def restore_host_env():
         os.environ.pop("LD_LIBRARY_PATH", None)
 
 
+def gdl_env(extra=None):
+    """
+    Environment for running gallery-dl. When it's the app's own bundled copy,
+    PYINSTALLER_RESET_ENVIRONMENT makes it start as an independent program
+    that finds its own libraries (otherwise it looks for them in the
+    parent's setup and fails, e.g. "libBLT…: cannot open shared object").
+    """
+    env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8",
+               PYTHONUTF8="1", **(extra or {}))
+    if FROZEN:
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return env
+
+
 def desktop_quote(arg):
     """One argument for the Exec= line of a .desktop file (freedesktop spec)."""
     if re.fullmatch(r"[\w/.+,:@=-]+", arg):
@@ -1181,6 +1195,7 @@ def gallery_dl_version(gdl):
     try:
         out = subprocess.run(list(gdl) + ["--version"], capture_output=True,
                              text=True, timeout=60, stdin=subprocess.DEVNULL,
+                             env=gdl_env(),
                              creationflags=CREATE_NO_WINDOW if WINDOWS else 0)
         return out.stdout.strip().splitlines()[0] if out.stdout.strip() else None
     except (OSError, subprocess.SubprocessError, IndexError):
@@ -2282,8 +2297,7 @@ class App:
 
     def run_process(self, args, on_line):
         """Runs gallery-dl and passes its output to on_line line by line."""
-        env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8",
-                   PYTHONUTF8="1")
+        env = gdl_env()
         proc = subprocess.Popen(
             list(self.gdl) + args, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, text=True,

@@ -510,3 +510,10 @@ def test_host_env_is_restored(monkeypatch):
     monkeypatch.setenv("LD_LIBRARY_PATH", "/bundle/lib")
     a.restore_host_env()                                  # no original → removed
     assert "LD_LIBRARY_PATH" not in os.environ
+
+
+def test_bundled_gallery_dl_starts_as_independent_program(monkeypatch):
+    monkeypatch.setattr(a, "FROZEN", True)
+    assert a.gdl_env()["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
+    monkeypatch.setattr(a, "FROZEN", False)
+    assert "PYINSTALLER_RESET_ENVIRONMENT" not in a.gdl_env()
