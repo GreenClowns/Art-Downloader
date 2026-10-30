@@ -2505,7 +2505,10 @@ class App:
         elif "[error]" in line:
             self.stats["err"] += 1
             if "Failed to download" in line:
-                self.failed.append(line.split("Failed to download", 1)[1].strip())
+                name = line.split("Failed to download", 1)[1].strip()
+                self.failed.append(name)
+                line = (line.split("Failed to download", 1)[0]
+                        + "Failed to download " + pretty_name(name))
             self.log(line, "err")
             if "authentication" in low or "password" in low or "login" in low:
                 self.log(tr(
