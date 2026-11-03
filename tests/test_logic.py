@@ -564,3 +564,46 @@ def test_bundled_gallery_dl_starts_as_independent_program(monkeypatch):
     assert a.gdl_env()["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
     monkeypatch.setattr(a, "FROZEN", False)
     assert "PYINSTALLER_RESET_ENVIRONMENT" not in a.gdl_env()
+
+
+def test_downloads_go_in_reading_order():
+    # the site lists newest first; folders keep the order they appeared in
+    order = {"30": ["Ch 2", 2, 0, "Ch 2 - Part 2", 0, True],
+             "29": ["Ch 2", 1, 0, "Ch 2 - Part 1", 1, True],
+             "12": ["Ch 1", 2, 0, "Ch 1 - Part 2", 2, True],
+             "11": ["Ch 1", 1, 0, "Ch 1 - Part 1", 3, True]}
+    ids = ["11", "12", "30", "29", "99"]          # 99: not in the order
+    assert a.reading_order(ids, order) == ["11", "12", "29", "30", "99"]
+    assert a.reading_order(["30", "12", "29", "11"], order) == ["29", "30", "11", "12"]
+
+
+def test_finished_download_line(tmp_path):
+    inc = tmp_path / ".incoming"
+    inc.mkdir()
+    f = inc / "da5_01_Part 1.png"
+    f.write_bytes(b"x")
+    (inc / "da6_01_Part 2.png.part").write_bytes(b"x")
+    assert a.finished_download(str(f), inc) == f
+    assert a.finished_download(str(f) + "\r", inc) == f
+    assert a.finished_download("# " + str(f), inc) is None          # skipped
+    assert a.finished_download(str(inc / "da6_01_Part 2.png.part"), inc) is None
+    assert a.finished_download("[1/3] https://x", inc) is None
+    assert a.finished_download("[deviantart][error] boom", inc) is None
+    assert a.finished_download(str(tmp_path / "other.png"), inc) is None
+    assert a.finished_download("da5_01_Part 1.png", inc) is None     # relative
+
+
+def test_files_are_placed_one_by_one_while_downloading(tmp_path):
+    inc = tmp_path / a.INCOMING
+    inc.mkdir()
+    order = {"5": ["Chapter 1", 1, 0, "Part 1", 0, True],
+             "6": ["Chapter 1", 2, 0, "Part 2", 1, True]}
+    f = inc / "da6_01_Part 2.png"
+    f.write_bytes(b"two")
+    assert a.organize_file(tmp_path, order, f) == "Chapter 1"
+    assert (tmp_path / "Chapter 1" / "002 - Part 2.png").read_bytes() == b"two"
+    (inc / "da5_01_Part 1.png").write_bytes(b"one")
+    assert a.organize(tmp_path, order) == {"Chapter 1": 1}            # the rest
+    assert sorted(p.name for p in (tmp_path / "Chapter 1").iterdir()) == [
+        "001 - Part 1.png", "002 - Part 2.png"]
+    assert not inc.exists()

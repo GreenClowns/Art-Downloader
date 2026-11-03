@@ -777,6 +777,80 @@ def save_order(dest, order):
         json.dumps(order, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+def organize_file(dest, order, f, risky=None):
+    """
+    Puts one finished download from .incoming in its place ("NNN - Title"
+    in its gallery folder). Returns the folder it went to ("." for the main
+    folder), or None if it was an exact duplicate.
+    """
+    dest = Path(dest)
+    m = DA_FILE_RE.match(f.name)
+    if (m and m.group(1) in order
+            and is_safe_component(order[m.group(1)][0])):
+        group, pos = order[m.group(1)][0], order[m.group(1)][1]
+        num, title, ext = int(m.group(2)), m.group(3), m.group(4) or ""
+        name = numbered_name(pos, group_width(order, group), num, title, ext)
+        target_dir = dest / group
+    elif m:      # DeviantArt, but order unknown
+        num, title, ext = int(m.group(2)), clean_title(m.group(3)), m.group(4) or ""
+        name = title + (f" ({num})" if num > 1 else "") + ext
+        group, target_dir = ".", dest
+    else:        # other sites — keep as is
+        name, group, target_dir = f.name, ".", dest
+    if not inside(dest, target_dir / name):
+        group, target_dir, name = ".", dest, Path(f.name).name
+    chapter = chapter_folder(name)
+    if group != "." and chapter and (target_dir / chapter).is_dir():
+        target_dir = target_dir / chapter  # folder already split
+    target = place(f, target_dir / name)   # drops exact duplicates
+    if target is None:
+        return None
+    if risky is not None and target.suffix.lower() in RISKY_EXTENSIONS:
+        risky.append(str(target.relative_to(dest)))
+    return group
+
+
+def reading_order(ids, order):
+    """
+    Work ids sorted the way they will be read: folder by folder (in the
+    order the folders first appear), then by number inside each folder.
+    The site lists galleries newest first; downloading in reading order
+    makes the folder fill up from 001 onwards.
+    """
+    first = {}
+    for i, idx in enumerate(ids):
+        if idx in order:
+            first.setdefault(order[idx][0], i)
+    def key(item):
+        i, idx = item
+        if idx not in order:
+            return (len(ids) + 1, 0, i)
+        group, pos = order[idx][0], order[idx][1]
+        return (first[group], pos, i)
+    return [idx for _, idx in sorted(enumerate(ids), key=key)]
+
+
+def finished_download(line, inc):
+    """
+    The file gallery-dl has just finished ("/path/.incoming/da…" line), if
+    it is in `inc`; otherwise None. gallery-dl prints this line only after
+    the file is complete and closed.
+    """
+    line = line.strip()
+    if not line or line.startswith(("#", "[")):
+        return None
+    try:
+        path = Path(line)
+        if not path.is_absolute():
+            return None
+        if os.path.normcase(os.path.abspath(path.parent)) != \
+                os.path.normcase(os.path.abspath(inc)):
+            return None
+        return path if path.is_file() and path.suffix != ".part" else None
+    except (OSError, ValueError):
+        return None
+
+
 def organize(dest, order, risky=None):
     """
     Moves downloads out of .incoming: DeviantArt files go to their gallery
@@ -793,30 +867,9 @@ def organize(dest, order, risky=None):
     for f in sorted(inc.iterdir()):
         if not f.is_file() or f.suffix == ".part" or f.name.startswith("."):
             continue
-        m = DA_FILE_RE.match(f.name)
-        if (m and m.group(1) in order
-                and is_safe_component(order[m.group(1)][0])):
-            group, pos = order[m.group(1)][0], order[m.group(1)][1]
-            num, title, ext = int(m.group(2)), m.group(3), m.group(4) or ""
-            name = numbered_name(pos, group_width(order, group), num, title, ext)
-            target_dir = dest / group
-        elif m:      # DeviantArt, but order unknown
-            num, title, ext = int(m.group(2)), clean_title(m.group(3)), m.group(4) or ""
-            name = title + (f" ({num})" if num > 1 else "") + ext
-            group, target_dir = ".", dest
-        else:        # other sites — keep as is
-            name, group, target_dir = f.name, ".", dest
-        if not inside(dest, target_dir / name):
-            group, target_dir, name = ".", dest, Path(f.name).name
-        chapter = chapter_folder(name)
-        if group != "." and chapter and (target_dir / chapter).is_dir():
-            target_dir = target_dir / chapter  # folder already split
-        target = place(f, target_dir / name)   # drops exact duplicates
-        if target is None:
-            continue
-        moved[group] = moved.get(group, 0) + 1
-        if risky is not None and target.suffix.lower() in RISKY_EXTENSIONS:
-            risky.append(str(target.relative_to(dest)))
+        group = organize_file(dest, order, f, risky)
+        if group is not None:
+            moved[group] = moved.get(group, 0) + 1
     try:
         inc.rmdir()
     except OSError:
@@ -1346,6 +1399,8 @@ class App:
 
         self.procs = []
         self.procs_lock = threading.Lock()
+        self.live = None              # (dest, order, risky, moved) while downloading
+        self.place_lock = threading.Lock()
         self.stop_flag = threading.Event()
         self.events = queue.Queue()
         self.worker = None
@@ -2415,16 +2470,36 @@ class App:
             jobs.append(lambda lf=lf: self.run_process(
                 args + ["-D", str(inc), "--download-archive", str(archive),
                         "-i", str(lf)],
-                lambda line: self.emit("line", line)))
+                lambda line: self.on_download_line(line, inc)))
         self.run_parallel(jobs, len(jobs))
         for i in range(1, len(parts) + 1):
             (inc / f"links_{i}.txt").unlink(missing_ok=True)
+
+    def on_download_line(self, line, inc):
+        """
+        Every finished file goes to its folder and number right away, so
+        the folder is in order while the download is still running.
+        """
+        self.emit("line", line)
+        live = self.live
+        path = finished_download(line, inc) if live else None
+        if path is None:
+            return
+        dest, order, risky, moved = live
+        try:
+            with self.place_lock:
+                group = organize_file(dest, order, path, risky)
+                if group is not None:
+                    moved[group] = moved.get(group, 0) + 1
+        except OSError:
+            pass                 # stays in .incoming, sorted at the end
 
     def run_job(self, urls, dest, browser, user, pwd, n_threads,
                 order_mode, retry, do_sort):
         cfg_path = make_run_config(user, pwd)
         inc = dest / INCOMING
         result = "ok"
+        risky, moved = [], {}     # filled while files are placed
         try:
             args = base_args(browser, cfg_path)
             if user:
@@ -2457,12 +2532,10 @@ class App:
             # new downloads land next to them in the right place
             self.emit("renumbered", renumber(dest, old_order, order))
             save_order(dest, order)
-            seen = set()
-            final = []
-            for idx, *_ in entries:
-                if idx not in seen:
-                    seen.add(idx)
-                    final.append(f"https://www.deviantart.com/view/{idx}")
+            self.live = (dest, order, risky, moved)
+            ids = list(dict.fromkeys(idx for idx, *_ in entries))
+            final = [f"https://www.deviantart.com/view/{idx}"
+                     for idx in reading_order(ids, order)]
             final += [u for u in direct if not deviation_id(u)]
             self.emit("log", (tr('Всего работ: {works}',
                                  'Total works: {works}', works=len(final)), "info"))
@@ -2505,9 +2578,13 @@ class App:
             result = "error"
         finally:
             # 4. Put files in order — even after Stop
+            self.live = None
             try:
-                risky = []
-                self.emit("organized", organize(dest, load_order(dest), risky))
+                with self.place_lock:
+                    for group, count in organize(dest, load_order(dest),
+                                                 risky).items():
+                        moved[group] = moved.get(group, 0) + count
+                self.emit("organized", moved)
                 self.emit("risky", risky)
                 if do_sort:
                     self.emit("sorted", sort_all_chapters(dest))
