@@ -521,6 +521,11 @@ def test_desktop_quote():
     assert q == '"/home/u/My Apps/A \\\\"b\\\\" \\\\$X 50%%.AppImage"'
 
 
+LINUX_ONLY = pytest.mark.skipif(sys.platform == "win32",
+                                reason="Linux menu entries (.desktop files)")
+
+
+@LINUX_ONLY
 def test_menu_entry_install_sync_remove(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "share"))
     first = str(tmp_path / "Загрузки" / "My Apps" / "ArtDownloader.AppImage")
@@ -537,6 +542,7 @@ def test_menu_entry_install_sync_remove(tmp_path, monkeypatch):
     assert a.sync_menu_entry(moved) is False             # never re-adds by itself
 
 
+@LINUX_ONLY
 def test_entry_from_install_sh_is_left_alone(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     d = tmp_path / "applications"
