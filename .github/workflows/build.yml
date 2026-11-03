@@ -195,6 +195,28 @@ jobs:
           merge-multiple: true
           path: dist
 
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/release-files.md
+          sparse-checkout-cone-mode: false
+          path: src
+
+      - name: Download table for the description
+        id: notes
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          BODY: ${{ github.event.release.body }}
+        run: |
+          v="${REF_NAME#v}"
+          sed "s/VERSION/$v/g" src/.github/release-files.md > files.md
+          # don't add the table twice if the description already has one
+          if printf '%s' "$BODY" | grep -q "Which file do I need"; then
+            echo "add=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "add=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Attach files to the release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
@@ -202,3 +224,10 @@ jobs:
             dist/*-Setup.exe
             dist/*-portable.zip
             dist/*.AppImage
+
+      - name: Add the download table to the description
+        if: steps.notes.outputs.add == 'true'
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          body_path: files.md
+          append_body: true
